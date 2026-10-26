@@ -1,0 +1,9 @@
+demucs-onnx>=0.3.4
+numpy>=1.24,<2.0
+scipy>=1.11
+psutil>=5.9
+PyQt6>=6.6
+sounddevice>=0.4.6
+soundfile>=0.12
+denote>=0.0.3
+celebritas>=0.1
