@@ -4,7 +4,7 @@ import os
 import subprocess
 import traceback
 import inspect
-import re
+import shutil
 from dataclasses import dataclass
 
 import numpy as np
@@ -39,6 +39,8 @@ from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                              QDialog, QDialogButtonBox, QComboBox, QFormLayout,
                              QScrollArea)
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer
+
+from style import COLORS, QSS
 
 
 # ---------------------------------------------------------------------------
@@ -165,12 +167,14 @@ class PrerequisiteDialog(QDialog):
         super().__init__(parent)
         self.results = results
         self.setWindowTitle("System Prerequisites")
-        self.setMinimumWidth(620)
+        self.setMinimumWidth(640)
 
         self.has_blocking_failure = any(
             r.blocking and r.status == "fail" for r in results)
 
         layout = QVBoxLayout(self)
+        layout.setContentsMargins(20, 20, 20, 20)
+        layout.setSpacing(14)
 
         header_text = (
             "<b>Cannot start the application.</b><br>"
@@ -184,20 +188,21 @@ class PrerequisiteDialog(QDialog):
         header = QLabel(header_text)
         header.setWordWrap(True)
         header.setStyleSheet(
-            "QLabel { padding: 10px; border-radius: 4px; "
-            + ("background-color: #f8d7da; color: #721c24; border: 1px solid #f5c6cb;"
+            "QLabel { padding: 14px; border-radius: 8px; font-size: 13px; "
+            + ("background-color: #3a1e22; color: #f8b6be; border: 1px solid #5a2a30;"
                if self.has_blocking_failure else
-               "background-color: #fff3cd; color: #856404; border: 1px solid #ffeeba;")
+               "background-color: #3a3020; color: #f0d090; border: 1px solid #5a4a20;")
             + " }"
         )
         layout.addWidget(header)
 
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
-        scroll.setMaximumHeight(340)
+        scroll.setMaximumHeight(360)
         inner = QWidget()
         inner_layout = QVBoxLayout(inner)
         inner_layout.setContentsMargins(0, 0, 0, 0)
+        inner_layout.setSpacing(6)
         for r in results:
             inner_layout.addWidget(self._make_row(r))
         inner_layout.addStretch()
@@ -210,6 +215,7 @@ class PrerequisiteDialog(QDialog):
         else:
             continue_btn = buttons.addButton(
                 "Continue anyway", QDialogButtonBox.ButtonRole.AcceptRole)
+            continue_btn.setObjectName("primary")
             continue_btn.setDefault(True)
             buttons.addButton("Quit", QDialogButtonBox.ButtonRole.RejectRole)
         buttons.accepted.connect(self.accept)
@@ -219,20 +225,32 @@ class PrerequisiteDialog(QDialog):
     def _make_row(self, r):
         row_widget = QWidget()
         row = QHBoxLayout(row_widget)
-        row.setContentsMargins(4, 4, 4, 4)
+        row.setContentsMargins(12, 8, 12, 8)
+        row.setSpacing(10)
+
         icon = QLabel(self.STATUS_ICON.get(r.status, "•"))
-        icon.setFixedWidth(28)
+        icon.setFixedWidth(24)
+        icon.setStyleSheet("font-size: 16px;")
         row.addWidget(icon)
+
         name = QLabel(f"<b>{r.name}</b>")
         name.setFixedWidth(110)
+        name.setStyleSheet(f"color: {COLORS['text']};")
         row.addWidget(name)
+
         msg = QLabel(r.message)
         msg.setWordWrap(True)
+        msg.setStyleSheet(f"color: {COLORS['text_dim']}; font-size: 12px;")
         row.addWidget(msg, 1)
-        bg = {"pass": "#d4edda", "warn": "#fff3cd",
-              "fail": "#f8d7da", "info": "#e2e3e5"}.get(r.status, "transparent")
+
+        bg = {
+            "pass": "#1e3a24",
+            "warn": "#3a3020",
+            "fail": "#3a1e22",
+            "info": "#2a2a30",
+        }.get(r.status, COLORS["bg_card"])
         row_widget.setStyleSheet(
-            f"QWidget {{ background-color: {bg}; border-radius: 3px; }}"
+            f"QWidget {{ background-color: {bg}; border-radius: 6px; }}"
             "QLabel { background-color: transparent; }")
         return row_widget
 
@@ -271,10 +289,13 @@ QUALITY_NOTES = {
 }
 
 
+# ---------------------------------------------------------------------------
+# Export worker with real FFmpeg progress
+# ---------------------------------------------------------------------------
+
 class ExportWorker(QThread):
-    """Runs FFmpeg encoding in the background with real progress."""
-    progress = pyqtSignal(int)      # 0-100
-    finished_ok = pyqtSignal(str)   # output path
+    progress = pyqtSignal(int)
+    finished_ok = pyqtSignal(str)
     failed = pyqtSignal(str)
 
     def __init__(self, input_wav, output_path, fmt_key, bitrate):
@@ -287,7 +308,6 @@ class ExportWorker(QThread):
     def run(self):
         try:
             if self.fmt_key == "WAV (lossless)":
-                import shutil
                 if self.input_wav != self.output_path:
                     shutil.copyfile(self.input_wav, self.output_path)
                 self.progress.emit(100)
@@ -308,20 +328,21 @@ class ExportWorker(QThread):
                    "-progress", "pipe:1", "-nostats"] + codec_args + [self.output_path]
 
             proc = subprocess.Popen(
-                cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+                cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
 
-            # FFmpeg -progress emits "out_time_ms=N" lines; convert to percent
+            try:
+                info = sf.info(self.input_wav)
+                total_us = info.frames / info.samplerate * 1_000_000
+            except Exception:
+                total_us = 0
+
             for line in proc.stdout:
                 line = line.strip()
-                if line.startswith("out_time_ms="):
+                if line.startswith("out_time_ms=") and total_us > 0:
                     try:
-                        us = int(line.split("=")[1])
-                        # Duration in seconds from soundfile
-                        info = sf.info(self.input_wav)
-                        total_us = info.frames / info.samplerate * 1_000_000
-                        if total_us > 0:
-                            pct = min(100, int(us / total_us * 100))
-                            self.progress.emit(pct)
+                        us = int(line.split("=", 1)[1])
+                        pct = max(0, min(100, int(us / total_us * 100)))
+                        self.progress.emit(pct)
                     except (ValueError, ZeroDivisionError):
                         pass
                 elif line == "progress=end":
@@ -329,8 +350,7 @@ class ExportWorker(QThread):
 
             proc.wait()
             if proc.returncode != 0:
-                err = proc.stderr.read()
-                self.failed.emit(f"FFmpeg error: {err[-400:]}")
+                self.failed.emit(f"FFmpeg exited with code {proc.returncode}")
                 return
 
             self.progress.emit(100)
@@ -382,24 +402,31 @@ class ModelSelectionDialog(QDialog):
         super().__init__(parent)
         self.resources = resources
         self.setWindowTitle("Choose Separation Model")
-        self.setMinimumWidth(580)
+        self.setMinimumWidth(620)
 
         layout = QVBoxLayout(self)
+        layout.setContentsMargins(20, 20, 20, 20)
+        layout.setSpacing(14)
+
+        title = QLabel("Separation Model")
+        title.setObjectName("header_title")
+        layout.addWidget(title)
 
         info = QLabel(
-            "Choose the separation mode. <b>High Quality</b> gives the best "
-            "results but is slower. <b>Fast</b> uses a lighter model that is "
-            "roughly 30% faster with slightly lower separation quality. "
-            "The <b>6-stem</b> option adds guitar and piano tracks at the cost "
-            "of much higher memory use."
+            "<b>High Quality</b> gives the best results but is slower. "
+            "<b>Fast</b> uses a lighter model that is roughly 30% faster with "
+            "slightly lower separation quality. The <b>6-stem</b> option adds "
+            "guitar and piano tracks at the cost of much higher memory use."
         )
         info.setWordWrap(True)
+        info.setStyleSheet(f"color: {COLORS['text_dim']}; font-size: 13px;")
         layout.addWidget(info)
 
         sys_line = QLabel(
             f"Detected: <b>{resources['ram_gb']:.1f} GB</b> available RAM, "
             f"<b>{resources['cores']}</b> CPU core(s).")
         sys_line.setWordWrap(True)
+        sys_line.setStyleSheet(f"color: {COLORS['text_dim']}; font-size: 12px;")
         layout.addWidget(sys_line)
 
         self.combo = QComboBox()
@@ -419,11 +446,17 @@ class ModelSelectionDialog(QDialog):
         self.force_cpu_cb = QCheckBox("Force CPU (slower, but safer on low-VRAM GPUs)")
         layout.addWidget(self.force_cpu_cb)
 
+        self.chunked_cb = QCheckBox(
+            "Use chunked separation (slower, but lower peak memory)")
+        self.chunked_cb.setChecked(resources["ram_gb"] < 8)
+        layout.addWidget(self.chunked_cb)
+
         self.warning_label = QLabel()
         self.warning_label.setWordWrap(True)
         self.warning_label.setStyleSheet(
-            "QLabel { background-color: #fff3cd; padding: 8px; "
-            "border: 1px solid #ffeeba; border-radius: 4px; color: #856404; }")
+            "QLabel { background-color: #3a3020; color: #f0d090; "
+            "padding: 12px; border: 1px solid #5a4a20; border-radius: 6px; "
+            "font-size: 12px; }")
         layout.addWidget(self.warning_label)
 
         if not resources["can_run_6_stem"]:
@@ -432,12 +465,16 @@ class ModelSelectionDialog(QDialog):
                 f"{resources['reason']}")
             blocked.setWordWrap(True)
             blocked.setStyleSheet(
-                "QLabel { background-color: #f8d7da; padding: 8px; "
-                "border: 1px solid #f5c6cb; border-radius: 4px; color: #721c24; }")
+                "QLabel { background-color: #3a1e22; color: #f8b6be; "
+                "padding: 12px; border: 1px solid #5a2a30; border-radius: 6px; "
+                "font-size: 12px; }")
             layout.addWidget(blocked)
 
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        ok_btn = buttons.button(QDialogButtonBox.StandardButton.Ok)
+        if ok_btn:
+            ok_btn.setObjectName("primary")
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
@@ -468,6 +505,9 @@ class ModelSelectionDialog(QDialog):
     def force_cpu(self):
         return self.force_cpu_cb.isChecked()
 
+    def use_chunked(self):
+        return self.chunked_cb.isChecked()
+
 
 # ---------------------------------------------------------------------------
 # Export dialog
@@ -477,10 +517,19 @@ class ExportDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Export Mix")
-        self.setMinimumWidth(420)
+        self.setMinimumWidth(460)
+
         layout = QVBoxLayout(self)
+        layout.setContentsMargins(20, 20, 20, 20)
+        layout.setSpacing(14)
+
+        title = QLabel("Export Mix")
+        title.setObjectName("header_title")
+        layout.addWidget(title)
 
         form = QFormLayout()
+        form.setSpacing(10)
+
         self.format_combo = QComboBox()
         self.format_combo.addItems(EXPORT_FORMATS.keys())
         self.format_combo.currentTextChanged.connect(self.on_format_changed)
@@ -492,14 +541,20 @@ class ExportDialog(QDialog):
 
         self.quality_label = QLabel()
         self.quality_label.setWordWrap(True)
-        self.quality_label.setMinimumHeight(70)
+        self.quality_label.setMinimumHeight(60)
         self.quality_label.setStyleSheet(
-            "QLabel { background-color: #f0f0f0; padding: 8px; "
-            "border: 1px solid #ccc; border-radius: 4px; }")
+            f"QLabel {{ background-color: {COLORS['bg_card']}; "
+            f"color: {COLORS['text_dim']}; padding: 12px; "
+            f"border: 1px solid {COLORS['border']}; border-radius: 6px; "
+            f"font-size: 12px; }}")
         layout.addWidget(self.quality_label)
 
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        ok_btn = buttons.button(QDialogButtonBox.StandardButton.Ok)
+        if ok_btn:
+            ok_btn.setObjectName("primary")
+            ok_btn.setText("Export")
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
@@ -528,47 +583,73 @@ class ExportDialog(QDialog):
 
 
 # ---------------------------------------------------------------------------
-# Separation worker with chunked progress
+# Separation worker — single-pass or chunked
 # ---------------------------------------------------------------------------
 
 class SeparationWorker(QThread):
     finished_ok = pyqtSignal(dict)
     failed = pyqtSignal(str)
-    progress = pyqtSignal(int, str)   # percent, status message
+    progress = pyqtSignal(int, str)
 
     def __init__(self, input_file, output_dir, model_name,
-                 providers="auto", precision="fp32", chunk_seconds=30):
+                 providers="auto", precision="fp32",
+                 chunked=False, chunk_seconds=60):
         super().__init__()
         self.input_file = input_file
         self.output_dir = output_dir
         self.model_name = model_name
         self.providers = providers
         self.precision = precision
+        self.chunked = chunked
         self.chunk_seconds = chunk_seconds
 
     def run(self):
         try:
-            self.progress.emit(0, "Reading audio file…")
-            audio, sr = sf.read(self.input_file, dtype="float32", always_2d=True)
-            total_frames = audio.shape[0]
-            chunk_frames = int(self.chunk_seconds * sr)
-            n_chunks = max(1, (total_frames + chunk_frames - 1) // chunk_frames)
+            if self.chunked:
+                self._run_chunked()
+            else:
+                self._run_single_pass()
+        except Exception as e:
+            tb = traceback.format_exc()
+            print(tb, file=sys.stderr)
+            self.failed.emit(str(e))
 
-            # Dict of stem name -> list of numpy chunks
-            stem_chunks = {}
-            tmp_dir = os.path.join(self.output_dir, "_tmp_chunks")
-            os.makedirs(tmp_dir, exist_ok=True)
+    def _run_single_pass(self):
+        self.progress.emit(5, "Loading model and separating…")
+        kwargs = dict(
+            model=self.model_name,
+            providers=self.providers,
+            precision=self.precision,
+            progress=False,
+        )
+        self.progress.emit(15, "Running separation (this may take a while)…")
+        result = demucs_onnx.separate(self.input_file, self.output_dir, **kwargs)
+        self.progress.emit(95, "Finalizing…")
+        normalized = self._normalize_result(result)
+        self.progress.emit(100, "Done")
+        self.finished_ok.emit(normalized)
 
+    def _run_chunked(self):
+        self.progress.emit(0, "Reading audio file…")
+        audio, sr = sf.read(self.input_file, dtype="float32", always_2d=True)
+        total_frames = audio.shape[0]
+        chunk_frames = int(self.chunk_seconds * sr)
+        n_chunks = max(1, (total_frames + chunk_frames - 1) // chunk_frames)
+
+        stem_chunks = {}
+        tmp_dir = os.path.join(self.output_dir, "_tmp_chunks")
+        os.makedirs(tmp_dir, exist_ok=True)
+
+        try:
             for i in range(n_chunks):
                 start = i * chunk_frames
                 end = min(start + chunk_frames, total_frames)
                 chunk = audio[start:end]
 
-                # Write chunk to a temp WAV so demucs_onnx can read it
                 chunk_path = os.path.join(tmp_dir, f"chunk_{i:04d}.wav")
                 sf.write(chunk_path, chunk, sr)
 
-                pct = int((i / n_chunks) * 100)
+                pct = int((i / n_chunks) * 90)
                 self.progress.emit(pct, f"Separating chunk {i+1}/{n_chunks}…")
 
                 kwargs = dict(
@@ -577,55 +658,50 @@ class SeparationWorker(QThread):
                     precision=self.precision,
                     progress=False,
                 )
-                # Run demucs on the chunk; results are written into tmp_dir
                 result = demucs_onnx.separate(chunk_path, tmp_dir, **kwargs)
 
-                # Load each stem result and append to accumulator
                 for stem_name, stem_path in self._normalize_result(result).items():
                     data, _ = sf.read(stem_path, dtype="float32", always_2d=True)
                     stem_chunks.setdefault(stem_name, []).append(data)
 
-                # Clean up the chunk input file
                 try:
                     os.remove(chunk_path)
                 except OSError:
                     pass
 
-            # Concatenate and write final stems
-            self.progress.emit(95, "Writing final stems…")
+            self.progress.emit(92, "Writing final stems…")
+            out_paths = {}
             for stem_name, chunks in stem_chunks.items():
                 combined = np.concatenate(chunks, axis=0)
                 out_path = os.path.join(self.output_dir, f"{stem_name}.wav")
                 sf.write(out_path, combined, sr)
+                out_paths[stem_name] = out_path
 
-            # Clean up temp folder
+            self.progress.emit(100, "Done")
+            self.finished_ok.emit(out_paths)
+        finally:
             try:
-                import shutil
                 shutil.rmtree(tmp_dir, ignore_errors=True)
             except Exception:
                 pass
 
-            self.progress.emit(100, "Done")
-            self.finished_ok.emit({name: os.path.join(self.output_dir, f"{name}.wav")
-                                   for name in stem_chunks.keys()})
-        except Exception as e:
-            tb = traceback.format_exc()
-            print(tb, file=sys.stderr)
-            self.failed.emit(str(e))
-
     def _normalize_result(self, result):
-        """Normalize whatever demucs_onnx.separate() returns into {name: path}."""
         if isinstance(result, dict):
             return {k: v for k, v in result.items()
                     if isinstance(v, str) and os.path.exists(v)}
+
         if isinstance(result, (list, tuple)):
-            # Some versions return a list of paths
             out = {}
-            for p in result:
-                if isinstance(p, str) and os.path.exists(p):
-                    name = os.path.splitext(os.path.basename(p))[0]
-                    out[name] = p
+            for item in result:
+                if isinstance(item, (list, tuple)) and len(item) == 2:
+                    name, path = item
+                    if isinstance(path, str) and os.path.exists(path):
+                        out[str(name)] = path
+                elif isinstance(item, str) and os.path.exists(item):
+                    name = os.path.splitext(os.path.basename(item))[0]
+                    out[name] = item
             return out
+
         return {}
 
 
@@ -646,6 +722,56 @@ class StemTrack:
 
     def reset(self):
         self.position = 0
+
+
+# ---------------------------------------------------------------------------
+# Track row widget
+# ---------------------------------------------------------------------------
+
+class TrackRow(QWidget):
+    def __init__(self, track, index, on_mute, on_volume, parent=None):
+        super().__init__(parent)
+        self.setObjectName("trackRow")
+        self.setStyleSheet(
+            f"QWidget#trackRow {{ background-color: {COLORS['bg_card']}; "
+            f"border-radius: 8px; }}")
+        self.setFixedHeight(52)
+
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(14, 8, 14, 8)
+        layout.setSpacing(12)
+
+        color = COLORS["track_colors"].get(track.name, COLORS["accent"])
+        dot = QLabel()
+        dot.setFixedSize(10, 10)
+        dot.setStyleSheet(f"background-color: {color}; border-radius: 5px;")
+        layout.addWidget(dot)
+
+        name = QLabel(track.name.capitalize())
+        name.setFixedWidth(80)
+        name.setStyleSheet(
+            f"font-weight: 600; font-size: 13px; color: {COLORS['text']};")
+        layout.addWidget(name)
+
+        mute_cb = QCheckBox("Mute")
+        mute_cb.setChecked(track.muted)
+        mute_cb.toggled.connect(lambda checked: on_mute(index, checked))
+        layout.addWidget(mute_cb)
+
+        slider = QSlider(Qt.Orientation.Horizontal)
+        slider.setRange(0, 200)
+        slider.setValue(int(track.volume * 100))
+        slider.valueChanged.connect(lambda val: on_volume(index, val / 100.0))
+        layout.addWidget(slider, 1)
+
+        vol_label = QLabel(f"{int(track.volume * 100)}%")
+        vol_label.setFixedWidth(44)
+        vol_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        vol_label.setStyleSheet(
+            f"color: {COLORS['text_dim']}; font-size: 12px; "
+            f"font-family: Menlo, Consolas, monospace;")
+        slider.valueChanged.connect(lambda val: vol_label.setText(f"{val}%"))
+        layout.addWidget(vol_label)
 
 
 # ---------------------------------------------------------------------------
@@ -679,7 +805,6 @@ class AudioMixer:
     def current_position_seconds(self):
         if not self.tracks:
             return 0.0
-        # Use the first track's position as the canonical playhead
         return self.tracks[0].position / self.samplerate
 
     def total_duration_seconds(self):
@@ -717,19 +842,20 @@ def render_mix_to_wav(tracks, wav_path, samplerate=44100, progress_cb=None):
     total_samples = max(len(t.data) for t in active_tracks)
     mix = np.zeros((total_samples, 2), dtype='float32')
 
-    # Process in blocks so we can report progress
-    block = 44100 * 5  # 5 seconds
-    processed = 0
+    total_work = sum(len(t.data) for t in active_tracks)
+    done_work = 0
+    block = samplerate * 5
+
     for track in active_tracks:
         pos = 0
         while pos < len(track.data):
             end = min(pos + block, len(track.data))
             mix[pos:end] += track.data[pos:end] * track.volume
+            done_work += (end - pos)
             pos = end
-            processed += (end - pos)
-            if progress_cb:
-                # Rough progress across all tracks
-                progress_cb(int(min(100, pos / len(track.data) * 50)))
+            if progress_cb and total_work > 0:
+                progress_cb(int(done_work / total_work * 100))
+
     if mix.ndim == 1:
         mix = np.column_stack((mix, mix))
     mix = np.clip(mix, -1.0, 1.0)
@@ -750,14 +876,14 @@ class MixerWindow(QMainWindow):
 
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Python Stem Mixer - Moises Alternative")
-        self.setGeometry(100, 100, 1000, 780)
+        self.setWindowTitle("StemsMix")
+        self.setGeometry(100, 100, 1040, 820)
         self.tracks = []
         self.mixer = None
         self.worker = None
         self.export_worker = None
         self.playback_timer = QTimer(self)
-        self.playback_timer.setInterval(200)  # 5 Hz
+        self.playback_timer.setInterval(200)
         self.playback_timer.timeout.connect(self.update_playback_position)
         self.init_ui()
 
@@ -765,8 +891,33 @@ class MixerWindow(QMainWindow):
         central = QWidget()
         self.setCentralWidget(central)
         main_layout = QVBoxLayout(central)
+        main_layout.setContentsMargins(20, 20, 20, 20)
+        main_layout.setSpacing(16)
 
+        # --- Header bar ---
+        header = QWidget()
+        header.setObjectName("header")
+        header.setStyleSheet(
+            f"QWidget#header {{ background-color: {COLORS['bg_alt']}; "
+            f"border-radius: 10px; }}")
+        header_layout = QHBoxLayout(header)
+        header_layout.setContentsMargins(20, 16, 20, 16)
+        header_layout.setSpacing(12)
+
+        title = QLabel("StemsMix")
+        title.setObjectName("header_title")
+        header_layout.addWidget(title)
+
+        subtitle = QLabel("Stem separation & mixing")
+        subtitle.setObjectName("header_subtitle")
+        header_layout.addWidget(subtitle)
+
+        header_layout.addStretch()
+        main_layout.addWidget(header)
+
+        # --- Top controls ---
         top_layout = QHBoxLayout()
+        top_layout.setSpacing(8)
 
         self.btn_open = QPushButton("Open Audio File…")
         self.btn_open.clicked.connect(self.open_audio_file)
@@ -776,7 +927,10 @@ class MixerWindow(QMainWindow):
         self.btn_load.clicked.connect(self.load_stems_folder)
         top_layout.addWidget(self.btn_load)
 
+        top_layout.addStretch()
+
         self.btn_play = QPushButton("Play")
+        self.btn_play.setObjectName("primary")
         self.btn_play.setEnabled(False)
         self.btn_play.clicked.connect(self.toggle_playback)
         top_layout.addWidget(self.btn_play)
@@ -787,14 +941,16 @@ class MixerWindow(QMainWindow):
         top_layout.addWidget(self.btn_stop)
 
         self.btn_export = QPushButton("Export Mix")
+        self.btn_export.setObjectName("primary")
         self.btn_export.setEnabled(False)
         self.btn_export.clicked.connect(self.export_mix_dialog)
         top_layout.addWidget(self.btn_export)
 
         main_layout.addLayout(top_layout)
 
-        # --- Separation progress bar (visible only during separation) ---
+        # --- Progress ---
         self.progress_label = QLabel("")
+        self.progress_label.setObjectName("progress_label")
         self.progress_label.setVisible(False)
         main_layout.addWidget(self.progress_label)
 
@@ -804,9 +960,12 @@ class MixerWindow(QMainWindow):
         self.progress.setVisible(False)
         main_layout.addWidget(self.progress)
 
-        # --- Playback position bar (visible only when tracks are loaded) ---
+        # --- Playback position ---
         playback_layout = QHBoxLayout()
+        playback_layout.setSpacing(10)
+
         self.position_label = QLabel("0:00 / 0:00")
+        self.position_label.setObjectName("position_label")
         self.position_label.setFixedWidth(110)
         playback_layout.addWidget(self.position_label)
 
@@ -814,18 +973,23 @@ class MixerWindow(QMainWindow):
         self.position_slider.setRange(0, 1000)
         self.position_slider.setValue(0)
         self.position_slider.sliderMoved.connect(self.seek_playback)
-        playback_layout.addWidget(self.position_slider)
+        playback_layout.addWidget(self.position_slider, 1)
 
         main_layout.addLayout(playback_layout)
 
-        # --- Track controls ---
+        # --- Tracks panel ---
         self.tracks_group = QGroupBox("Tracks")
         self.tracks_layout = QVBoxLayout()
+        self.tracks_layout.setSpacing(6)
+        self.tracks_layout.setContentsMargins(10, 8, 10, 10)
         self.tracks_group.setLayout(self.tracks_layout)
-        main_layout.addWidget(self.tracks_group)
+        main_layout.addWidget(self.tracks_group, 1)
 
+        # --- Status bar ---
         self.status_label = QLabel(
             "Open an audio file to separate, or load a folder of existing stems.")
+        self.status_label.setObjectName("status_bar")
+        self.status_label.setWordWrap(True)
         main_layout.addWidget(self.status_label)
 
     # ------------------------------------------------------------------
@@ -855,6 +1019,7 @@ class MixerWindow(QMainWindow):
 
         model_name = model_dlg.selected_model()
         force_cpu = model_dlg.force_cpu()
+        chunked = model_dlg.use_chunked()
         providers = ["cpu"] if force_cpu else "auto"
 
         default_out = os.path.splitext(input_file)[0] + "_stems"
@@ -870,12 +1035,13 @@ class MixerWindow(QMainWindow):
         self._set_separation_running(True)
         self.progress.setValue(0)
         self.progress_label.setText("Starting separation…")
+        mode_note = " (chunked)" if chunked else ""
         self.status_label.setText(
-            f"Separating '{os.path.basename(input_file)}' with {model_name}…")
+            f"Separating '{os.path.basename(input_file)}' with {model_name}{mode_note}…")
 
         self.worker = SeparationWorker(
             input_file, output_dir, model_name,
-            providers=providers, precision="fp32")
+            providers=providers, precision="fp32", chunked=chunked)
         self.worker.progress.connect(self.on_separation_progress)
         self.worker.finished_ok.connect(
             lambda paths: self.on_separation_done(paths, output_dir))
@@ -939,7 +1105,6 @@ class MixerWindow(QMainWindow):
             self.mixer.stop()
         self.mixer = AudioMixer(self.tracks)
 
-        # Update playback slider range to reflect track duration
         duration = self.mixer.total_duration_seconds()
         self.position_slider.blockSignals(True)
         self.position_slider.setRange(0, max(1, int(duration * 1000)))
@@ -964,28 +1129,8 @@ class MixerWindow(QMainWindow):
                 item.widget().deleteLater()
 
         for i, track in enumerate(self.tracks):
-            row = QHBoxLayout()
-            label = QLabel(track.name.capitalize())
-            label.setFixedWidth(80)
-            row.addWidget(label)
-
-            mute_cb = QCheckBox("Mute")
-            mute_cb.setChecked(track.muted)
-            mute_cb.toggled.connect(lambda checked, idx=i: self.set_mute(idx, checked))
-            row.addWidget(mute_cb)
-
-            slider = QSlider(Qt.Orientation.Horizontal)
-            slider.setRange(0, 200)
-            slider.setValue(int(track.volume * 100))
-            slider.valueChanged.connect(lambda val, idx=i: self.set_volume(idx, val / 100.0))
-            row.addWidget(slider)
-
-            vol_label = QLabel(f"{int(track.volume * 100)}%")
-            vol_label.setFixedWidth(40)
-            slider.valueChanged.connect(lambda val, lbl=vol_label: lbl.setText(f"{val}%"))
-            row.addWidget(vol_label)
-
-            self.tracks_layout.addLayout(row)
+            row = TrackRow(track, i, self.set_mute, self.set_volume)
+            self.tracks_layout.addWidget(row)
 
     def set_mute(self, index, muted):
         if 0 <= index < len(self.tracks):
@@ -1022,7 +1167,8 @@ class MixerWindow(QMainWindow):
         self.position_slider.blockSignals(True)
         self.position_slider.setValue(0)
         self.position_slider.blockSignals(False)
-        self.update_position_label(0.0, self.mixer.total_duration_seconds() if self.mixer else 0)
+        self.update_position_label(
+            0.0, self.mixer.total_duration_seconds() if self.mixer else 0)
         self.btn_play.setText("Play")
         self.status_label.setText("Stopped and reset to beginning.")
 
@@ -1081,7 +1227,6 @@ class MixerWindow(QMainWindow):
         if not path.lower().endswith(f".{ext}"):
             path += f".{ext}"
 
-        # Render mix to temp WAV with progress
         tmp_wav = path + ".tmp.wav"
         self.progress.setVisible(True)
         self.progress_label.setVisible(True)
@@ -1097,9 +1242,10 @@ class MixerWindow(QMainWindow):
                                        QApplication.processEvents()))
             if not ok:
                 self.status_label.setText("Export failed — no active tracks.")
+                self.progress.setVisible(False)
+                self.progress_label.setVisible(False)
                 return
 
-            # Encode with FFmpeg in a background thread
             self.progress_label.setText("Encoding…")
             self.progress.setValue(0)
             self.export_worker = ExportWorker(tmp_wav, path, fmt_key, bitrate)
@@ -1153,6 +1299,7 @@ class MixerWindow(QMainWindow):
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
+    app.setStyleSheet(QSS)
 
     results = run_prerequisite_checks()
     needs_dialog = any(r.status in ("warn", "fail") for r in results)
