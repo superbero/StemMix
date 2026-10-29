@@ -483,18 +483,18 @@ class ModelSelectionDialog(QDialog):
 
     def on_model_changed(self):
         model_name, _ = self.combo.currentData()
+        # Never auto-enable Force CPU: that skips MLX Metal and falls
+        # back to slow ONNX-on-CPU on Apple Silicon.
+        self.force_cpu_cb.setChecked(False)
         if model_name == "htdemucs_6s":
-            self.force_cpu_cb.setChecked(True)
             self.warning_label.setText(
-                "⚠ The 6-stem model is RAM-heavy. Force CPU is pre-selected for "
-                "safety. Test with a short clip first and monitor memory usage.")
+                "6-stem (guitar + piano): uses Metal/MLX on Apple Silicon. "
+                "Only check Force CPU if separation runs out of memory.")
         elif model_name == "htdemucs":
-            self.force_cpu_cb.setChecked(False)
             self.warning_label.setText(
                 "Fast 4-stem model selected. Single-model architecture, "
                 "roughly 30% faster than the quality bag.")
         else:
-            self.force_cpu_cb.setChecked(False)
             self.warning_label.setText(
                 "High Quality 4-stem model selected — best separation quality, "
                 "but the slowest of the three options.")

@@ -1,8 +1,11 @@
 """Dialogs: prerequisites, model selection, export."""
+import os
+
 from PyQt6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout,
                              QLabel, QDialogButtonBox, QComboBox,
                              QCheckBox, QFormLayout, QScrollArea,
-                             QWidget)
+                             QWidget, QLineEdit, QPushButton,
+                             QFileDialog)
 
 from .style import COLORS
 from core.export import EXPORT_FORMATS, QUALITY_NOTES
@@ -97,7 +100,7 @@ class PrerequisiteDialog(QDialog):
 
 
 class ModelSelectionDialog(QDialog):
-    def __init__(self, resources, parent=None):
+    def __init__(self, resources, parent=None, default_output_dir=""):
         super().__init__(parent)
         self.resources = resources
         self.setWindowTitle("Choose Separation Model")
@@ -139,6 +142,22 @@ class ModelSelectionDialog(QDialog):
                 "Fine 6-stem (htdemucs_6s)", "htdemucs_6s")
         self.combo.currentIndexChanged.connect(self.on_model_changed)
         layout.addWidget(self.combo)
+
+        out_label = QLabel("Output folder")
+        out_label.setStyleSheet(
+            "color: " + COLORS["text_dim"] + "; font-size: 12px;")
+        layout.addWidget(out_label)
+
+        out_row = QHBoxLayout()
+        out_row.setSpacing(8)
+        self.output_edit = QLineEdit(default_output_dir or "")
+        self.output_edit.setPlaceholderText(
+            "Folder where stem WAV files will be written")
+        out_row.addWidget(self.output_edit, 1)
+        browse_btn = QPushButton("Browse…")
+        browse_btn.clicked.connect(self._browse_output_dir)
+        out_row.addWidget(browse_btn)
+        layout.addLayout(out_row)
 
         self.force_cpu_cb = QCheckBox("Force CPU")
         layout.addWidget(self.force_cpu_cb)
@@ -183,29 +202,53 @@ class ModelSelectionDialog(QDialog):
 
     def on_model_changed(self):
         model_name = self.combo.currentData()
+        # Never auto-enable Force CPU: on Apple Silicon that skips the
+        # MLX Metal path and falls back to slow ONNX-on-CPU (often 10-30x).
+        self.force_cpu_cb.setChecked(False)
         if model_name == "htdemucs_6s":
-            self.force_cpu_cb.setChecked(True)
             self.warning_label.setText(
-                "6-stem is RAM-heavy. Force CPU is pre-selected.")
+                "6-stem (guitar + piano): uses Metal/MLX on Apple Silicon. "
+                "Only check Force CPU if separation runs out of memory.")
         elif model_name == "htdemucs":
-            self.force_cpu_cb.setChecked(False)
             self.warning_label.setText(
                 "Fast 4-stem: MLX-accelerated on Apple Silicon. "
                 "Leave 'Force CPU' unchecked for maximum speed.")
         else:
-            self.force_cpu_cb.setChecked(False)
             self.warning_label.setText(
                 "High Quality 4-stem: MLX-accelerated on Apple Silicon. "
                 "Leave 'Force CPU' unchecked for maximum speed.")
 
+    def _browse_output_dir(self):
+        start = self.output_edit.text().strip()
+        if start and os.path.isdir(start):
+            start_dir = start
+        elif start:
+            start_dir = os.path.dirname(start) or os.path.expanduser("~")
+        else:
+            start_dir = os.path.expanduser("~")
+        chosen = QFileDialog.getExistingDirectory(
+            self, "Choose Output Folder", start_dir)
+        if chosen:
+            self.output_edit.setText(chosen)
+
     def selected_model(self):
         return self.combo.currentData()
+
+    def output_dir(self):
+        return self.output_edit.text().strip()
 
     def force_cpu(self):
         return self.force_cpu_cb.isChecked()
 
     def use_chunked(self):
         return self.chunked_cb.isChecked()
+
+    def accept(self):
+        if not self.output_dir():
+            self.warning_label.setText(
+                "Choose an output folder for the separated stems.")
+            return
+        super().accept()
 
 
 class ExportDialog(QDialog):

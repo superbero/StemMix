@@ -494,14 +494,17 @@ class DAWWindow(QMainWindow):
             "*.flac *.ogg *.opus *.wma);;All Files (*)")
         if not input_file:
             return
-        dlg = ModelSelectionDialog(resources, self)
+        default_out = os.path.splitext(input_file)[0] + "_stems"
+        dlg = ModelSelectionDialog(
+            resources, self, default_output_dir=default_out)
         if dlg.exec() != QDialog.DialogCode.Accepted:
             return
         model = dlg.selected_model()
         providers = ["cpu"] if dlg.force_cpu() else "auto"
         chunked = dlg.use_chunked()
+        out_dir = dlg.output_dir()
+        os.makedirs(out_dir, exist_ok=True)
 
-        out_dir = os.path.splitext(input_file)[0] + "_stems"
         self._halt_playback()
         self._set_busy(True)
         self.progress.setValue(0)
@@ -1091,8 +1094,7 @@ class DAWWindow(QMainWindow):
         os.makedirs(out_dir, exist_ok=True)
         self.btn_split_drums.setEnabled(False)
         self.status.setText("Splitting drums...")
-        self.drum_worker = DrumSplitWorker(
-            drums_path, out_dir, device="cpu")
+        self.drum_worker = DrumSplitWorker(drums_path, out_dir)
         self.drum_worker.progress.connect(
             lambda p, m: self.status.setText(m))
         self.drum_worker.finished_ok.connect(

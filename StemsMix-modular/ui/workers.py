@@ -119,19 +119,31 @@ class ExportWorker(QThread):
 # Drum splitting worker
 # ---------------------------------------------------------------------------
 
+def _preferred_torch_device():
+    """Pick the fastest torch device available (cuda > mps > cpu)."""
+    try:
+        import torch
+        if torch.cuda.is_available():
+            return "cuda"
+        if (hasattr(torch.backends, "mps")
+                and torch.backends.mps.is_available()):
+            return "mps"
+    except Exception:
+        pass
+    return "cpu"
+
+
 class DrumSplitWorker(QThread):
     """Splits a drums stem into kick/snare/toms/hh/ride/crash.
 
-    Uses mdxnet-infer's MDX23CInference (the package has no
-    MDXNetSession class; importing that name always failed, which made
-    the feature report "not installed" even when it was).
-    Runs on CPU by default. Change device to 'cuda' for a big speedup.
+    Uses mdxnet-infer's MDX23CInference. device=None auto-picks
+    cuda / Apple MPS / cpu (MPS is typically many times faster than CPU).
     """
     finished_ok = pyqtSignal(dict)
     failed = pyqtSignal(str)
     progress = pyqtSignal(int, str)
 
-    def __init__(self, drums_path, output_dir, device="cpu"):
+    def __init__(self, drums_path, output_dir, device=None):
         super().__init__()
         self.drums_path = drums_path
         self.output_dir = output_dir
@@ -146,6 +158,7 @@ class DrumSplitWorker(QThread):
 
         try:
             os.makedirs(self.output_dir, exist_ok=True)
+            device = self.device or _preferred_torch_device()
 
             self.progress.emit(5, "Loading drums file...")
             audio, sr = sf.read(
@@ -157,12 +170,13 @@ class DrumSplitWorker(QThread):
                 audio = audio[:, :2]
 
             self.progress.emit(
-                15, "Loading model (first run downloads ~438 MB)...")
+                15, "Loading model on {} (first run downloads "
+                    "~438 MB)...".format(device))
             engine = MDX23CInference.from_pretrained(
-                "drumsep-6stem", device=self.device, progress=False)
+                "drumsep-6stem", device=device, progress=False)
 
             self.progress.emit(
-                35, "Splitting drums (several minutes on CPU)...")
+                35, "Splitting drums on {}...".format(device))
             stems = engine.separate(
                 audio, sample_rate=sr, progress=False)
             if not stems:
