@@ -483,8 +483,7 @@ class ModelSelectionDialog(QDialog):
 
     def on_model_changed(self):
         model_name, _ = self.combo.currentData()
-        # Never auto-enable Force CPU: that skips MLX Metal and falls
-        # back to slow ONNX-on-CPU on Apple Silicon.
+        # GPU stays on for every model — never auto-force CPU.
         self.force_cpu_cb.setChecked(False)
         if model_name == "htdemucs_6s":
             self.warning_label.setText(
@@ -496,8 +495,8 @@ class ModelSelectionDialog(QDialog):
                 "roughly 30% faster than the quality bag.")
         else:
             self.warning_label.setText(
-                "High Quality 4-stem model selected — best separation quality, "
-                "but the slowest of the three options.")
+                "High Quality 4-stem (htdemucs_ft): ~4x slower, GPU stays ON. "
+                "Do not enable Force CPU unless you hit memory limits.")
 
     def selected_model(self):
         return self.combo.currentData()[0]

@@ -17,10 +17,10 @@ from PyQt6.QtWidgets import (QApplication, QDialog, QDoubleSpinBox, QFileDialog,
 
 from ui.style import COLORS, QSS
 from ui.dialogs import (PrerequisiteDialog, ExportDialog,
-                        ModelSelectionDialog)
-from ui.workers import (DrumSplitWorker, ChordAnalysisWorker,
-                        SeparationWorker, RenderWorker,
-                        BeatAnalysisWorker)
+                        ModelSelectionDialog, OutputFolderDialog)
+from ui.workers import (DrumSplitWorker, DrumPreloadWorker,
+                        ChordAnalysisWorker, SeparationWorker,
+                        RenderWorker, BeatAnalysisWorker)
 from ui.timeline import (TimelineScene, TimelineView, TimeRuler,
                          ChordStrip, CHORD_HEIGHT, TrackHeader, TrackHeaderColumn, HEADER_WIDTH,
                          RULER_HEIGHT, time_to_x)
@@ -105,6 +105,7 @@ class DAWWindow(QMainWindow):
         self.engine = None
         self.export_worker = None
         self.drum_worker = None
+        self.drum_preload = None
         self.chord_worker = None
         self.sep_worker = None
         self.render_worker = None
@@ -463,12 +464,39 @@ class DAWWindow(QMainWindow):
         self.progress.setFixedWidth(180)
         self.progress.setVisible(False)
         h.addWidget(self.progress)
+        self.btn_cancel = QPushButton("Cancel")
+        self.btn_cancel.setVisible(False)
+        self.btn_cancel.clicked.connect(self.cancel_busy_job)
+        h.addWidget(self.btn_cancel)
         return bar
 
     def _set_inspector_enabled(self, on):
         for w in (self.spin_start, self.spin_stretch, self.spin_pitch,
                   self.slider_gain):
             w.setEnabled(on)
+
+    def start_background_preload(self):
+        """Warm drumsep weights so the first Split Drums is faster."""
+        self.drum_preload = DrumPreloadWorker()
+
+        def _ready(device):
+            # Don't clobber an active job status line.
+            if self.sep_worker and self.sep_worker.isRunning():
+                return
+            if self.drum_worker and self.drum_worker.isRunning():
+                return
+            self.status.setText(
+                "Ready — drum model cached on {}.".format(device))
+
+        self.drum_preload.finished_ok.connect(_ready)
+        self.drum_preload.start()
+
+    def cancel_busy_job(self):
+        for w in (self.sep_worker, self.drum_worker):
+            if w is not None and w.isRunning() and hasattr(w, "cancel"):
+                w.cancel()
+                self.status.setText("Cancelling…")
+                self.progress_label.setText("Cancelling…")
 
     # ------------------------------------------------------------- loading
     def load_stems(self):
@@ -480,6 +508,7 @@ class DAWWindow(QMainWindow):
     def _set_busy(self, busy):
         self.progress.setVisible(busy)
         self.progress_label.setVisible(busy)
+        self.btn_cancel.setVisible(busy)
         self.btn_open.setEnabled(not busy)
         self.btn_load.setEnabled(not busy)
 
@@ -494,16 +523,19 @@ class DAWWindow(QMainWindow):
             "*.flac *.ogg *.opus *.wma);;All Files (*)")
         if not input_file:
             return
-        default_out = os.path.splitext(input_file)[0] + "_stems"
-        dlg = ModelSelectionDialog(
-            resources, self, default_output_dir=default_out)
+
+        out_dlg = OutputFolderDialog(input_file, self)
+        if out_dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+        out_dir = out_dlg.output_dir()
+        os.makedirs(out_dir, exist_ok=True)
+
+        dlg = ModelSelectionDialog(resources, self)
         if dlg.exec() != QDialog.DialogCode.Accepted:
             return
         model = dlg.selected_model()
         providers = ["cpu"] if dlg.force_cpu() else "auto"
         chunked = dlg.use_chunked()
-        out_dir = dlg.output_dir()
-        os.makedirs(out_dir, exist_ok=True)
 
         self._halt_playback()
         self._set_busy(True)
@@ -1093,15 +1125,21 @@ class DAWWindow(QMainWindow):
             os.path.dirname(drums_path), "drum_parts")
         os.makedirs(out_dir, exist_ok=True)
         self.btn_split_drums.setEnabled(False)
+        self._set_busy(True)
+        self.progress.setValue(0)
+        self.progress_label.setText("Splitting drums...")
         self.status.setText("Splitting drums...")
         self.drum_worker = DrumSplitWorker(drums_path, out_dir)
-        self.drum_worker.progress.connect(
-            lambda p, m: self.status.setText(m))
+        self.drum_worker.progress.connect(self.on_sep_progress)
         self.drum_worker.finished_ok.connect(
             lambda paths: self.on_drums_split(paths, out_dir))
         self.drum_worker.failed.connect(
             lambda e: self.status.setText("Drum split failed: " + e))
-        self.drum_worker.finished.connect(self._refresh_tool_buttons)
+        def _drum_done():
+            self._set_busy(False)
+            self._refresh_tool_buttons()
+
+        self.drum_worker.finished.connect(_drum_done)
         self.drum_worker.start()
 
     def on_drums_split(self, paths, out_dir):
@@ -1215,10 +1253,13 @@ if __name__ == "__main__":
     app = QApplication(sys.argv)
     app.setStyleSheet(QSS)
     results = run_prerequisite_checks()
+    # Always show the dialog when anything is missing or suboptimal so
+    # the user can one-click install pip/brew packages.
     if any(r.status in ("warn", "fail") for r in results):
         dlg = PrerequisiteDialog(results)
         if dlg.exec() != QDialog.DialogCode.Accepted:
             sys.exit(0)
     w = DAWWindow()
     w.show()
+    QTimer.singleShot(400, w.start_background_preload)
     sys.exit(app.exec())

@@ -50,15 +50,24 @@ class SeparationWorker(QThread):
         self.providers = providers
         self.precision = precision
         self.chunked = chunked
+        self._cancel = False
+
+    def cancel(self):
+        self._cancel = True
 
     def run(self):
         try:
             def cb(pct, msg):
                 self.progress.emit(pct, msg)
+                if self._cancel:
+                    raise RuntimeError("Cancelled.")
             result = separate_file(
                 self.input_file, self.output_dir, self.model_name,
                 providers=self.providers, precision=self.precision,
                 chunked=self.chunked, progress_cb=cb)
+            if self._cancel:
+                self.failed.emit("Cancelled.")
+                return
             self.finished_ok.emit(result)
         except Exception as e:
             traceback.print_exc()
@@ -119,25 +128,32 @@ class ExportWorker(QThread):
 # Drum splitting worker
 # ---------------------------------------------------------------------------
 
-def _preferred_torch_device():
-    """Pick the fastest torch device available (cuda > mps > cpu)."""
-    try:
-        import torch
-        if torch.cuda.is_available():
-            return "cuda"
-        if (hasattr(torch.backends, "mps")
-                and torch.backends.mps.is_available()):
-            return "mps"
-    except Exception:
-        pass
-    return "cpu"
+class DrumPreloadWorker(QThread):
+    """Warm the drumsep model cache after app start."""
+    finished_ok = pyqtSignal(str)
+    failed = pyqtSignal(str)
+
+    def run(self):
+        if not MDXNET_AVAILABLE:
+            self.failed.emit(str(MDXNET_ERROR))
+            return
+        try:
+            from core.drumsep import preload
+            device = preload()
+            if device:
+                self.finished_ok.emit(device)
+            else:
+                self.failed.emit("Drum model preload failed.")
+        except Exception as e:
+            traceback.print_exc()
+            self.failed.emit(str(e))
 
 
 class DrumSplitWorker(QThread):
     """Splits a drums stem into kick/snare/toms/hh/ride/crash.
 
-    Uses mdxnet-infer's MDX23CInference. device=None auto-picks
-    cuda / Apple MPS / cpu (MPS is typically many times faster than CPU).
+    Uses a process-wide cached MDX23C model and raised batch size on
+    MPS/CUDA. device=None auto-picks cuda / Apple MPS / cpu.
     """
     finished_ok = pyqtSignal(dict)
     failed = pyqtSignal(str)
@@ -148,6 +164,10 @@ class DrumSplitWorker(QThread):
         self.drums_path = drums_path
         self.output_dir = output_dir
         self.device = device
+        self._cancel = False
+
+    def cancel(self):
+        self._cancel = True
 
     def run(self):
         if not MDXNET_AVAILABLE:
@@ -157,36 +177,45 @@ class DrumSplitWorker(QThread):
             return
 
         try:
+            from core.drumsep import (
+                get_engine, preferred_device, inference_tuning)
+
             os.makedirs(self.output_dir, exist_ok=True)
-            device = self.device or _preferred_torch_device()
+            device = self.device or preferred_device()
 
             self.progress.emit(5, "Loading drums file...")
             audio, sr = sf.read(
                 self.drums_path, dtype="float32", always_2d=True)
-            # The model wants (frames, 2).
             if audio.shape[1] == 1:
                 audio = np.repeat(audio, 2, axis=1)
             elif audio.shape[1] > 2:
                 audio = audio[:, :2]
 
-            self.progress.emit(
-                15, "Loading model on {} (first run downloads "
-                    "~438 MB)...".format(device))
-            engine = MDX23CInference.from_pretrained(
-                "drumsep-6stem", device=device, progress=False)
+            if self._cancel:
+                self.failed.emit("Cancelled.")
+                return
+
+            engine = get_engine(
+                device=device,
+                progress_cb=lambda p, m: self.progress.emit(p, m))
+            tune = inference_tuning(device)
 
             self.progress.emit(
-                35, "Splitting drums on {}...".format(device))
+                35,
+                "Splitting drums on {} (batch={}, overlap={})...".format(
+                    device, tune["batch_size"], tune["overlap"]))
             stems = engine.separate(
-                audio, sample_rate=sr, progress=False)
+                audio, sample_rate=sr, progress=False,
+                batch_size=tune["batch_size"],
+                overlap=tune["overlap"])
+            if self._cancel:
+                self.failed.emit("Cancelled.")
+                return
             if not stems:
                 self.failed.emit("Model returned no stems.")
                 return
 
-            # The model resamples to its own rate (44100), so write the
-            # parts at that rate, not at the input file's.
             out_sr = engine.config.audio.sample_rate
-
             self.progress.emit(85, "Writing stem files...")
             paths = {}
             for name, data in stems.items():
