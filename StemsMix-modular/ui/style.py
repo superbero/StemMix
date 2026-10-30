@@ -214,4 +214,6 @@ QComboBox::drop-down { border: none; width: 24px; }
 QComboBox QAbstractItemView { background-color: %(bg_card)s;
     border: 1px solid %(border)s; border-radius: 6px;
     selection-background-color: %(accent)s; padding: 4px; outline: none; }
+QFrame#fxGroup { background-color: %(bg_alt)s;
+                 border: 1px solid %(border)s; border-radius: 8px; }
 """ % COLORS

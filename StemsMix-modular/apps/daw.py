@@ -13,6 +13,7 @@ from ui.project_actions import (install_shortcuts as install_project_shortcuts,
 
 from core.history import History
 
+
 from core.stem_export import export_stems
 
 from PyQt6.QtCore import Qt, QSize, QThread, QTimer, pyqtSignal
@@ -125,6 +126,7 @@ class DAWWindow(QMainWindow):
         self.setWindowTitle("StemsMix")
         self.resize(1500, 960)
         self.setMinimumSize(1280, 700)
+        self.history = History()
         self.project = Project()
         self.project_path = None
         self.dsp_chains = {}
@@ -155,12 +157,8 @@ class DAWWindow(QMainWindow):
             sc = QShortcut(QKeySequence(key), self)
             sc.activated.connect(fn)
         self._project_shortcuts = install_project_shortcuts(self)
-        undo_sc = QShortcut(QKeySequence.StandardKey.Undo, self)
-        undo_sc.activated.connect(self.undo)
-        redo_sc = QShortcut(QKeySequence("Ctrl+Shift+Z"), self)
-        redo_sc.activated.connect(self.redo)
         self.stem_export_worker = None
-        self.history = History()          # <-- add this line inside __init__
+                  # <-- add this line inside __init__
 
     # ------------------------------------------------------------------ UI
     def init_ui(self):
@@ -197,6 +195,132 @@ class DAWWindow(QMainWindow):
         root.addWidget(split, 1)
         root.addWidget(self._build_statusbar())
         self._refresh_tool_buttons()
+        # Attach the menu bar once, after every widget exists.
+        from ui.menubar import build_menubar
+        self._menubar = build_menubar(self)
+
+
+    def import_stems(self):
+        """Import additional audio files into the project."""
+        from ui.import_stems_dialog import ImportStemsDialog
+        from core.audio_io import load_audio
+        from core.timeline_model import Clip, Track
+        from core.dsp import DSPChain
+
+        if not self.project.tracks:
+            # Empty project: nothing to import into; load as a fresh set instead.
+            self.status.setText(
+                "Load a stems folder first, then import additional audio.")
+            return
+
+        playhead = self.engine.playhead_seconds if self.engine else 0.0
+        dlg = ImportStemsDialog(self.project, playhead, self)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+
+        files = dlg.selected_files()
+        mode = dlg.import_mode()
+        target = dlg.target_track_name()
+
+        self._push_undo("Import stems")
+        self._halt_playback()
+
+        added_tracks = 0
+        added_clips = 0
+        failed = []
+
+        for path in files:
+            try:
+                data, sr = load_audio(path)
+            except Exception as e:
+                failed.append((path, str(e)))
+                continue
+
+            name = os.path.splitext(os.path.basename(path))[0]
+
+            if mode == "new_track":
+                # Ensure unique track name
+                base = name
+                suffix = 1
+                existing = {t.name for t in self.project.tracks}
+                while name in existing:
+                    suffix += 1
+                    name = "{}_{}".format(base, suffix)
+                track = Track(name)
+                clip = Clip(name, path, data, sr, start_time=playhead)
+                track.add_clip(clip)
+                self.project.add_track(track)
+                self.dsp_chains[name] = DSPChain(sr)
+                added_tracks += 1
+            else:
+                # Add a clip to the target track
+                track = next(
+                    (t for t in self.project.tracks if t.name == target),
+                    None)
+                if track is None:
+                    failed.append((path, "target track gone"))
+                    continue
+                clip = Clip(target, path, data, sr, start_time=playhead)
+                track.add_clip(clip)
+                added_clips += 1
+
+        self.project._recompute_duration()
+        self._rebuild_ui()
+
+        summary = []
+        if added_tracks:
+            summary.append("{} new track(s)".format(added_tracks))
+        if added_clips:
+            summary.append("{} clip(s)".format(added_clips))
+        if failed:
+            summary.append("{} failed".format(len(failed)))
+            for p, err in failed[:3]:
+                print("Import failed for {}: {}".format(p, err))
+        self.status.setText("Imported " + ", ".join(summary) + ".")
+
+    # --- Menu-driven actions -------------------------------------------------
+
+    def save_project(self, save_as=False):
+        from ui.project_actions import save_project_dialog
+        path = save_project_dialog(self, save_as=save_as)
+        if path:
+            self.project_path = path
+
+    def open_project(self):
+        from ui.project_actions import open_project_dialog
+        result = open_project_dialog(self)
+        if result is not None:
+            self.project_path = result.path
+            self._install_loaded_project(result)
+
+
+    def open_batch(self):
+        from ui.batch_dialog import BatchDialog
+        BatchDialog(self).exec()
+
+    def undo(self):
+        if not getattr(self, "history", None) or not self.history.can_undo():
+            self.status.setText("Nothing to undo.")
+            return
+        self._halt_playback()
+        result = self.history.undo(self.project)
+        if result is None:
+            return
+        label, restored = result
+        self._install_project(restored)
+        self.status.setText("Undo: " + label)
+
+    def redo(self):
+        if not getattr(self, "history", None) or not self.history.can_redo():
+            self.status.setText("Nothing to redo.")
+            return
+        self._halt_playback()
+        result = self.history.redo(self.project)
+        if result is None:
+            return
+        label, restored = result
+        self._install_project(restored)
+        self.status.setText("Redo: " + label)
 
     def _build_transport(self):
         bar = QFrame()
@@ -262,7 +386,7 @@ class DAWWindow(QMainWindow):
         self.btn_export_stems = QPushButton("Export Stems")
         self.btn_export_stems.setObjectName("primary")
         self.btn_export_stems.setToolTip("Export each track as its own WAV")
-        self.btn_export_stems.clicked.connect(self.export_stems_clicked)
+        self.btn_export_stems.clicked.connect(self.export_stems)
         h.addWidget(self.btn_export_stems)
         self.btn_batch = QPushButton("Batch…")
         self.btn_batch.setToolTip("Separate many files in one run")
@@ -270,9 +394,6 @@ class DAWWindow(QMainWindow):
         h.addWidget(self.btn_batch)
         return bar
 
-    def open_batch(self):
-        from ui.batch_dialog import BatchDialog
-        BatchDialog(self).exec()
 
     def _build_songbar(self):
         bar = QFrame()
@@ -509,7 +630,7 @@ class DAWWindow(QMainWindow):
         self.btn_clip_fx = QPushButton("FX…")
         self.btn_clip_fx.setToolTip("Effects for this clip only")
         self.btn_clip_fx.clicked.connect(self._open_clip_fx)
-        self.btn_clip_fx.setEnabled(True)
+        self.btn_clip_fx.setEnabled(False)
         h.addWidget(self.btn_clip_fx)
         return bar
 
@@ -680,6 +801,11 @@ class DAWWindow(QMainWindow):
             "Loaded {} stems from {}".format(loaded, folder))
 
     def _rebuild_ui(self):
+        try:
+            self.scene.selectionChanged.disconnect(
+                self.on_selection_changed)
+        except (TypeError, RuntimeError):
+            pass
         self._halt_playback()
         self.selected_clip = None
         self.scene.clear_clips()
@@ -712,6 +838,8 @@ class DAWWindow(QMainWindow):
         self._refresh_song_controls()
         self._show_playhead(0.0)
         self._refresh_tool_buttons()
+        self.scene.selectionChanged.connect(
+            self.on_selection_changed)
         self.on_selection_changed()
 
     def _refresh_tool_buttons(self):
@@ -724,8 +852,6 @@ class DAWWindow(QMainWindow):
         for b in (self.btn_play, self.btn_stop, self.btn_rewind):
             b.setEnabled(has)
 
-        has = bool(names)
-        self.btn_export.setEnabled(has)
         self.btn_export_stems.setEnabled(has)
 
     # ---------------------------------------------------- track controls
@@ -773,12 +899,16 @@ class DAWWindow(QMainWindow):
             self.selected_clip = None
             self.lbl_clip_name.setText("No clip selected")
             self._set_inspector_enabled(False)
+            if hasattr(self, "btn_clip_fx"):
+                self.btn_clip_fx.setEnabled(False)
             return
         item = items[0]
         clip = item.clip_ref
         self.selected_clip = (clip, item)
         self.lbl_clip_name.setText(clip.stem_name.capitalize())
         self._set_inspector_enabled(True)
+        if hasattr(self, "btn_clip_fx"):
+            self.btn_clip_fx.setEnabled(True)
         for w, v in ((self.spin_start, clip.start_time),
                      (self.spin_stretch, clip.stretch),
                      (self.spin_pitch, clip.semitones)):
@@ -792,6 +922,7 @@ class DAWWindow(QMainWindow):
 
     def on_clip_start_changed(self, value):
         if self.selected_clip:
+            self._push_undo("Move clip")
             clip, item = self.selected_clip
             clip.start_time = value
             item.setX(time_to_x(value))
@@ -1320,23 +1451,22 @@ class DAWWindow(QMainWindow):
                 len(chords), ", ".join(names[:8]) + (" ..." if len(names) > 8 else "")))
 
     def closeEvent(self, event):
+        try:
+            self.scene.selectionChanged.disconnect(
+                self.on_selection_changed)
+        except (TypeError, RuntimeError):
+            pass
         if self.engine:
             self.engine.stop()
         self.playback_timer.stop()
         for w in (self.export_worker, self.drum_worker,
-                  self.chord_worker, self.sep_worker, self.render_worker,
-                  self.beat_worker):
+                  self.chord_worker, self.sep_worker,
+                  self.render_worker, self.beat_worker,
+                  self.stem_export_worker):
             if w is not None and w.isRunning():
                 w.terminate()
                 w.wait(2000)
         event.accept()
-
-        for w in (self.export_worker, self.drum_worker,
-                  self.chord_worker, self.sep_worker, self.render_worker,
-                  self.beat_worker, self.stem_export_worker):
-            if w is not None and w.isRunning():
-                    w.terminate()
-                    w.wait(2000)
 
     def _open_project_clicked(self):
         """User clicked Open Project (or pressed Ctrl/Cmd + O)."""
@@ -1441,14 +1571,8 @@ class DAWWindow(QMainWindow):
         if any(c.needs_render() for t in project.tracks for c in t.clips):
             self._request_render()
 
-    def on_clip_start_changed(self, value):
-        if self.selected_clip:
-            self._push_undo("Move clip")
-            clip, item = self.selected_clip
-            clip.start_time = value
-            ...
 
-    def export_stems_clicked(self):
+    def export_stems(self):
         if not self.project.tracks:
             return
         out_dir = QFileDialog.getExistingDirectory(
