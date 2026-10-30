@@ -11,6 +11,9 @@ sys.path.insert(0, os.path.dirname(
 from ui.project_actions import (install_shortcuts as install_project_shortcuts,
                                 open_project_dialog, save_project_dialog)
 
+from core.history import History
+self.history = History()
+
 from PyQt6.QtCore import Qt, QSize, QThread, QTimer, pyqtSignal
 from PyQt6.QtGui import QKeySequence, QShortcut
 from PyQt6.QtWidgets import (QApplication, QDialog, QDoubleSpinBox, QFileDialog,
@@ -131,7 +134,10 @@ class DAWWindow(QMainWindow):
             sc = QShortcut(QKeySequence(key), self)
             sc.activated.connect(fn)
         self._project_shortcuts = install_project_shortcuts(self)
-
+        undo_sc = QShortcut(QKeySequence.StandardKey.Undo, self)
+        undo_sc.activated.connect(self.undo)
+        redo_sc = QShortcut(QKeySequence("Ctrl+Shift+Z"), self)
+        redo_sc.activated.connect(self.redo)
     # ------------------------------------------------------------------ UI
     def init_ui(self):
         central = QWidget()
@@ -1328,6 +1334,55 @@ class DAWWindow(QMainWindow):
         """Ctrl/Cmd+O target. Same as _open_project_clicked, kept separate so
         the shortcut can be rebound independently."""
         self._open_project_clicked()
+
+    def _push_undo(self, label):
+        """Call before mutating project state."""
+        self.history.push(label, self.project)
+
+    def undo(self):
+        if not self.history.can_undo():
+            self.status.setText("Nothing to undo.")
+            return
+        self._halt_playback()
+        result = self.history.undo(self.project)
+        if result is None:
+            return
+        label, restored = result
+        self._install_project(restored)
+        self.status.setText("Undo: " + label)
+
+    def redo(self):
+        if not self.history.can_redo():
+            self.status.setText("Nothing to redo.")
+            return
+        self._halt_playback()
+        result = self.history.redo(self.project)
+        if result is None:
+            return
+        label, restored = result
+        self._install_project(restored)
+        self.status.setText("Redo: " + label)
+
+    def _install_project(self, project):
+        """Adopt a Project (from undo/redo) and rebuild the UI."""
+        self.project = project
+        for name in list(self.dsp_chains.keys()):
+            if not any(t.name == name for t in project.tracks):
+                del self.dsp_chains[name]
+        from core.dsp import DSPChain
+        for track in project.tracks:
+            if track.name not in self.dsp_chains:
+                self.dsp_chains[track.name] = DSPChain(project.samplerate)
+        self._rebuild_ui()
+        if any(c.needs_render() for t in project.tracks for c in t.clips):
+            self._request_render()
+
+    def on_clip_start_changed(self, value):
+        if self.selected_clip:
+            self._push_undo("Move clip")
+            clip, item = self.selected_clip
+            clip.start_time = value
+            ...
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
