@@ -12,7 +12,8 @@ from ui.project_actions import (install_shortcuts as install_project_shortcuts,
                                 open_project_dialog, save_project_dialog)
 
 from core.history import History
-self.history = History()
+
+from core.stem_export import export_stems
 
 from PyQt6.QtCore import Qt, QSize, QThread, QTimer, pyqtSignal
 from PyQt6.QtGui import QKeySequence, QShortcut
@@ -97,6 +98,26 @@ class RenderExportWorker(QThread):
             except OSError:
                 pass
 
+class StemExportWorker(QThread):
+    """Renders each track as its own WAV, off the UI thread."""
+    progress = pyqtSignal(int, str)
+    finished_ok = pyqtSignal(list)
+    failed = pyqtSignal(str)
+
+    def __init__(self, engine, out_dir, parent=None):
+        super().__init__(parent)
+        self.engine = engine
+        self.out_dir = out_dir
+
+    def run(self):
+        try:
+            files = export_stems(
+                self.engine, self.out_dir,
+                progress_cb=lambda p, m: self.progress.emit(p, m))
+            self.finished_ok.emit(files)
+        except Exception as e:
+            self.failed.emit(str(e))
+
 
 class DAWWindow(QMainWindow):
     def __init__(self):
@@ -138,6 +159,9 @@ class DAWWindow(QMainWindow):
         undo_sc.activated.connect(self.undo)
         redo_sc = QShortcut(QKeySequence("Ctrl+Shift+Z"), self)
         redo_sc.activated.connect(self.redo)
+        self.stem_export_worker = None
+        self.history = History()          # <-- add this line inside __init__
+
     # ------------------------------------------------------------------ UI
     def init_ui(self):
         central = QWidget()
@@ -235,6 +259,11 @@ class DAWWindow(QMainWindow):
         self.btn_export.setObjectName("primary")
         self.btn_export.clicked.connect(self.export_mix)
         h.addWidget(self.btn_export)
+        self.btn_export_stems = QPushButton("Export Stems")
+        self.btn_export_stems.setObjectName("primary")
+        self.btn_export_stems.setToolTip("Export each track as its own WAV")
+        self.btn_export_stems.clicked.connect(self.export_stems_clicked)
+        h.addWidget(self.btn_export_stems)
         return bar
 
     def _build_songbar(self):
@@ -670,6 +699,10 @@ class DAWWindow(QMainWindow):
         self.btn_export.setEnabled(has)
         for b in (self.btn_play, self.btn_stop, self.btn_rewind):
             b.setEnabled(has)
+
+        has = bool(names)
+        self.btn_export.setEnabled(has)
+        self.btn_export_stems.setEnabled(has)
 
     # ---------------------------------------------------- track controls
     def _track(self, name):
@@ -1274,6 +1307,13 @@ class DAWWindow(QMainWindow):
                 w.wait(2000)
         event.accept()
 
+        for w in (self.export_worker, self.drum_worker,
+                  self.chord_worker, self.sep_worker, self.render_worker,
+                  self.beat_worker, self.stem_export_worker):
+            if w is not None and w.isRunning():
+                    w.terminate()
+                    w.wait(2000)
+
     def _open_project_clicked(self):
         """User clicked Open Project (or pressed Ctrl/Cmd + O)."""
         result = open_project_dialog(self)
@@ -1383,6 +1423,51 @@ class DAWWindow(QMainWindow):
             clip, item = self.selected_clip
             clip.start_time = value
             ...
+
+    def export_stems_clicked(self):
+        if not self.project.tracks:
+            return
+        out_dir = QFileDialog.getExistingDirectory(
+            self, "Choose folder for stems")
+        if not out_dir:
+            return
+        if self._render_busy():
+            self.status.setText("Wait for the tempo/key render to finish.")
+            return
+        if self.stem_export_worker and self.stem_export_worker.isRunning():
+            self.status.setText("Stem export already running.")
+            return
+        if self.engine.is_playing:
+            self.toggle_playback()
+
+        self.btn_export_stems.setEnabled(False)
+        self.btn_export.setEnabled(False)
+        self.btn_play.setEnabled(False)
+        self._set_busy(True)
+        self.progress.setValue(0)
+        self.progress_label.setText("Exporting stems…")
+
+        self.stem_export_worker = StemExportWorker(self.engine, out_dir)
+        self.stem_export_worker.progress.connect(self.on_sep_progress)
+        self.stem_export_worker.finished_ok.connect(self._stems_exported)
+        self.stem_export_worker.failed.connect(
+            lambda m: self.status.setText("Stem export failed: " + m))
+        self.stem_export_worker.finished.connect(self._stem_export_cleanup)
+        self.stem_export_worker.start()
+
+    def _stems_exported(self, files):
+        if not files:
+            self.status.setText("Stem export produced no files.")
+            return
+        folder = os.path.dirname(files[0][1])
+        self.status.setText(
+            "Exported {} stems to {}".format(len(files), folder))
+
+    def _stem_export_cleanup(self):
+        self._set_busy(False)
+        self.btn_export_stems.setEnabled(True)
+        self.btn_export.setEnabled(True)
+        self.btn_play.setEnabled(True)
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
