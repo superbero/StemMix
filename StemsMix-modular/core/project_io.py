@@ -105,10 +105,9 @@ def _clip_to_dict(clip):
         "muted": bool(clip.muted),
         "soloed": bool(clip.soloed),
         "color_hint": clip.color_hint,
+        "effects": (None if clip.effects is None
+                    else _dsp_to_dict(clip.effects)),
     }
-
-    "effects": (None if clip.effects is None
-                else _dsp_to_dict(clip.effects)),
 
 def _track_to_dict(track, dsp):
     return {
