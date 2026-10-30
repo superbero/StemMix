@@ -107,6 +107,8 @@ def _clip_to_dict(clip):
         "color_hint": clip.color_hint,
     }
 
+    "effects": (None if clip.effects is None
+                else _dsp_to_dict(clip.effects)),
 
 def _track_to_dict(track, dsp):
     return {
@@ -290,6 +292,13 @@ def load_project(path):
 
     project._recompute_duration()
     return ProjectLoadResult(project, dsp_params, missing, path)
+
+    effects = cdata.get("effects")
+    if effects:
+        from .dsp import DSPChain
+        chain = DSPChain(project.samplerate)
+        apply_dsp_params(chain, effects)
+        clip.effects = chain
 
 
 def apply_dsp_params(dsp_chain, params):

@@ -264,7 +264,15 @@ class DAWWindow(QMainWindow):
         self.btn_export_stems.setToolTip("Export each track as its own WAV")
         self.btn_export_stems.clicked.connect(self.export_stems_clicked)
         h.addWidget(self.btn_export_stems)
+        self.btn_batch = QPushButton("Batch…")
+        self.btn_batch.setToolTip("Separate many files in one run")
+        self.btn_batch.clicked.connect(self.open_batch)
+        h.addWidget(self.btn_batch)
         return bar
+
+    def open_batch(self):
+        from ui.batch_dialog import BatchDialog
+        BatchDialog(self).exec()
 
     def _build_songbar(self):
         bar = QFrame()
@@ -453,6 +461,7 @@ class DAWWindow(QMainWindow):
         h.addWidget(self.lbl_clip_name)
         h.addSpacing(8)
 
+
         def field(text, spin):
             lab = QLabel(text)
             lab.setObjectName("sectionLabel")
@@ -497,7 +506,22 @@ class DAWWindow(QMainWindow):
         h.addWidget(self.lbl_gain)
         h.addStretch()
         self._set_inspector_enabled(False)
+        self.btn_clip_fx = QPushButton("FX…")
+        self.btn_clip_fx.setToolTip("Effects for this clip only")
+        self.btn_clip_fx.clicked.connect(self._open_clip_fx)
+        self.btn_clip_fx.setEnabled(True)
+        h.addWidget(self.btn_clip_fx)
         return bar
+
+    def _open_clip_fx(self):
+        if not self.selected_clip:
+            return
+        from ui.clip_effects_dialog import ClipEffectsDialog
+        clip, _ = self.selected_clip
+        self._push_undo("Clip effects")
+        dlg = ClipEffectsDialog(clip, self)
+        dlg.exec()
+        self.status.setText("Clip effects updated.")
 
     def _build_statusbar(self):
         bar = QFrame()

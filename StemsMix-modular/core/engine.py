@@ -132,6 +132,9 @@ class TimelineEngine:
                 chunk = src[a - cs:b - cs] * (clip.gain * track.volume)
                 chunk = (dsp.process_offline(chunk) if offline
                          else dsp.process(chunk))
+                if getattr(clip, "effects", None) is not None:
+                    chunk = (clip.effects.process_offline(chunk) if offline
+                             else clip.effects.process(chunk))
                 chunk = self._apply_pan(chunk, track.pan)
                 peak = np.maximum(peak, np.abs(chunk).max(axis=0))
                 out[a - start_frame:b - start_frame] += chunk

@@ -30,6 +30,7 @@ class Clip:
         self.render = None
         self.render_key = None
         self.render_quality = None   # 'fast' (preview) or 'high'
+        self.effects = None   # optional DSPChain, applied after the track chain
 
     # -- rendering state
     def render_params(self):
