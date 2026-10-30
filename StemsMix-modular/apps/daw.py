@@ -8,6 +8,9 @@ import numpy as np
 sys.path.insert(0, os.path.dirname(
     os.path.dirname(os.path.abspath(__file__))))
 
+from ui.project_actions import (install_shortcuts as install_project_shortcuts,
+                                open_project_dialog, save_project_dialog)
+
 from PyQt6.QtCore import Qt, QSize, QThread, QTimer, pyqtSignal
 from PyQt6.QtGui import QKeySequence, QShortcut
 from PyQt6.QtWidgets import (QApplication, QDialog, QDoubleSpinBox, QFileDialog,
@@ -99,6 +102,7 @@ class DAWWindow(QMainWindow):
         self.resize(1500, 960)
         self.setMinimumSize(1280, 700)
         self.project = Project()
+        self.project_path = None
         self.dsp_chains = {}
         self.track_headers = {}
         self.selected_clip = None
@@ -126,6 +130,7 @@ class DAWWindow(QMainWindow):
                         (Qt.Key.Key_Home, self.rewind)):
             sc = QShortcut(QKeySequence(key), self)
             sc.activated.connect(fn)
+        self._project_shortcuts = install_project_shortcuts(self)
 
     # ------------------------------------------------------------------ UI
     def init_ui(self):
@@ -179,6 +184,21 @@ class DAWWindow(QMainWindow):
         self.btn_open.clicked.connect(self.open_audio_file)
         self.btn_load = QPushButton("Load Stems...")
         self.btn_load.clicked.connect(self.load_stems)
+        self.btn_save = QPushButton("Save")
+        self.btn_save.setToolTip("Save project (Ctrl/Cmd + S)")
+        self.btn_save.clicked.connect(
+            lambda: save_project_dialog(self, save_as=False))
+        self.btn_save_as = QPushButton("Save As…")
+        self.btn_save_as.setToolTip("Save project to a new file (Ctrl/Cmd + Shift + S)")
+        self.btn_save_as.clicked.connect(
+            lambda: save_project_dialog(self, save_as=True))
+        self.btn_open_project = QPushButton("Open Project…")
+        self.btn_open_project.setToolTip("Open a .stemmix project (Ctrl/Cmd + O)")
+        self.btn_open_project.clicked.connect(
+            lambda: self._open_project_clicked())
+        h.addWidget(self.btn_save)
+        h.addWidget(self.btn_save_as)
+        h.addWidget(self.btn_open_project)
         h.addWidget(self.btn_open)
         h.addWidget(self.btn_load)
         h.addStretch(1)
@@ -1248,6 +1268,66 @@ class DAWWindow(QMainWindow):
                 w.wait(2000)
         event.accept()
 
+    def _open_project_clicked(self):
+        """User clicked Open Project (or pressed Ctrl/Cmd + O)."""
+        result = open_project_dialog(self)
+        if result is None:
+            return
+        self._install_loaded_project(result)
+
+    def _install_loaded_project(self, result):
+        """Install a ProjectLoadResult produced by ui.project_actions."""
+        project = result.project
+        self._halt_playback()
+
+        # Build a DSP chain per track and apply the saved parameters.
+        chains = {}
+        from core.dsp import DSPChain
+        from core.project_io import apply_dsp_params
+        for track in project.tracks:
+            dsp = DSPChain(project.samplerate)
+            apply_dsp_params(dsp, result.dsp_params.get(track.name, {}))
+            chains[track.name] = dsp
+
+        self.project = project
+        self.dsp_chains = chains
+        self.stem_paths = {
+            track.name: track.clips[0].filepath
+            for track in project.tracks
+            if track.clips
+        }
+
+        self.chords = []
+        self.chord_label.setVisible(False)
+        self.chord_strip.setVisible(False)
+        self._rebuild_ui()
+
+        # Beat grid and click are stored in the project; no need to re-detect.
+        if project.beat_times:
+            self._refresh_beat_ui()
+
+        # Stretched/pitch-shifted clips are silent until re-rendered.
+        if any(c.needs_render() for t in project.tracks for c in t.clips):
+            self._request_render()
+            self.status.setText(
+                "Opened {} ({} tracks). Rendering tempo/key changes…".format(
+                    os.path.basename(result.path), len(project.tracks)))
+        else:
+            self.status.setText(
+                "Opened {} ({} tracks).".format(
+                    os.path.basename(result.path), len(project.tracks)))
+
+        QTimer.singleShot(0, lambda: self.view.fit_to(project.total_duration))
+
+        if result.missing:
+            self.status.setText(
+                self.status.text()
+                + "  ({} clips missing audio)".format(len(result.missing)))
+
+    def _open_project_for_shortcut(self):
+        """Ctrl/Cmd+O target. Same as _open_project_clicked, kept separate so
+        the shortcut can be rebound independently."""
+        self._open_project_clicked()
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
