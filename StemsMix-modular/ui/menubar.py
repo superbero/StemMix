@@ -4,7 +4,7 @@ Attaches a QMenuBar to the given QMainWindow and returns it. Uses
 explicit QAction objects so a missing method on the window is obvious
 (an error at connect time) rather than silently hiding the menu item.
 """
-from PyQt6.QtGui import QAction, QKeySequence
+from PyQt6.QtGui import QAction, QActionGroup, QKeySequence
 from PyQt6.QtWidgets import QMenuBar
 
 
@@ -89,6 +89,15 @@ def build_menubar(window):
     act_quit.triggered.connect(window.close)
     file_menu.addAction(act_quit)
 
+    # --- Track ---
+    track_menu = bar.addMenu("&Track")
+    act_import_stems = QAction("Add Audio Track…", window)
+    act_import_stems.triggered.connect(window.import_stems)
+    track_menu.addAction(act_import_stems)
+    act_readd = QAction("Re-add Removed Track…", window)
+    act_readd.triggered.connect(window.readd_removed_track)
+    track_menu.addAction(act_readd)
+
     # --- Edit ---
     edit_menu = bar.addMenu("&Edit")
 
@@ -146,6 +155,22 @@ def build_menubar(window):
     act_loop_section.setShortcut(QKeySequence("Ctrl+Alt+L"))
     act_loop_section.triggered.connect(window.loop_selected_section)
     section_menu.addAction(act_loop_section)
+
+    automation_menu = bar.addMenu("&Automation")
+    automation_group = QActionGroup(window)
+    automation_group.setExclusive(True)
+    for label, parameter in (
+            ("Automation Off", None),
+            ("Track Volume", "volume"),
+            ("Track Pan", "pan")):
+        action = QAction(label, window)
+        action.setCheckable(True)
+        action.setChecked(parameter is None)
+        automation_group.addAction(action)
+        automation_menu.addAction(action)
+        action.triggered.connect(
+            lambda checked, value=parameter:
+            window.set_automation_mode(value))
 
     window._menubar = bar
     return bar

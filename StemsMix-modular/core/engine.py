@@ -2,6 +2,8 @@
 import numpy as np
 import sounddevice as sd
 
+from .automation import evaluate_points
+
 
 class TimelineEngine:
     """Reads from a Project at a global playhead position."""
@@ -256,6 +258,12 @@ class TimelineEngine:
         for track in self.project.tracks:
             dsp = self.dsp_lookup(track.name)
             peak = np.zeros(2)
+            volume = evaluate_points(
+                track.automation.get("volume", []), "volume",
+                start_frame, n_frames, sr)
+            pan = evaluate_points(
+                track.automation.get("pan", []), "pan",
+                start_frame, n_frames, sr, default=track.pan)
             for clip in track.clips:
                 if not self.project.is_audible(track, clip):
                     continue
@@ -270,7 +278,11 @@ class TimelineEngine:
                 n = b - a
                 if n <= 0:
                     continue
-                chunk = src[a - cs:b - cs] * (clip.gain * track.volume)
+                block_start = a - start_frame
+                block_end = b - start_frame
+                chunk = src[a - cs:b - cs] * (
+                    clip.gain * track.volume
+                    * volume[block_start:block_end, None])
                 chunk = self._apply_clip_fades(clip, chunk, a, b)
                 cf = self._crossfade_gain(track, clip, a, b)
                 if len(cf) == chunk.shape[0]:
@@ -280,7 +292,10 @@ class TimelineEngine:
                 if getattr(clip, "effects", None) is not None:
                     chunk = (clip.effects.process_offline(chunk) if offline
                              else clip.effects.process(chunk))
-                chunk = self._apply_pan(chunk, track.pan)
+                pan_values = np.clip(
+                    pan[block_start:block_end], -1.0, 1.0)
+                chunk[:, 0] *= np.where(pan_values > 0, 1.0 - pan_values, 1.0)
+                chunk[:, 1] *= np.where(pan_values < 0, 1.0 + pan_values, 1.0)
                 peak = np.maximum(peak, np.abs(chunk).max(axis=0))
                 out[a - start_frame:b - start_frame] += chunk
             levels[track.name] = (float(peak[0]), float(peak[1]))

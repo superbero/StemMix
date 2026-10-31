@@ -214,12 +214,6 @@ class DAWWindow(QMainWindow):
         from core.timeline_model import Clip, Track
         from core.dsp import DSPChain
 
-        if not self.project.tracks:
-            # Empty project: nothing to import into; load as a fresh set instead.
-            self.status.setText(
-                "Load a stems folder first, then import additional audio.")
-            return
-
         playhead = self.engine.playhead_seconds if self.engine else 0.0
         dlg = ImportStemsDialog(self.project, playhead, self)
         if dlg.exec() != QDialog.DialogCode.Accepted:
@@ -258,7 +252,9 @@ class DAWWindow(QMainWindow):
                 # Ensure unique track name
                 base = name
                 suffix = 1
-                existing = {t.name for t in self.project.tracks}
+                existing = {
+                    t.name for t in (
+                        self.project.tracks + self.project.removed_tracks)}
                 while name in existing:
                     suffix += 1
                     name = "{}_{}".format(base, suffix)
@@ -356,6 +352,10 @@ class DAWWindow(QMainWindow):
         imported.pan = source_track.pan
         imported.muted = source_track.muted
         imported.soloed = source_track.soloed
+        imported.automation = {
+            parameter: [list(point) for point in points]
+            for parameter, points in source_track.automation.items()
+        }
 
         try:
             for source_clip in source_track.clips:
@@ -379,7 +379,9 @@ class DAWWindow(QMainWindow):
             return
 
         base_name = imported.name
-        existing = {track.name for track in self.project.tracks}
+        existing = {
+            track.name for track in (
+                self.project.tracks + self.project.removed_tracks)}
         suffix = 2
         while imported.name in existing:
             imported.name = "{}_{}".format(base_name, suffix)
@@ -860,6 +862,9 @@ class DAWWindow(QMainWindow):
         self.header_col = TrackHeaderColumn()
         self.scene.selectionChanged.connect(self.on_selection_changed)
         self.scene.clip_moved.connect(self.on_clip_moved)
+        self.scene.automation_edit_started.connect(
+            self._on_automation_edit_started)
+        self.scene.automation_changed.connect(self._on_automation_changed)
         self.ruler.seek_requested.connect(self.on_seek)
         self.view.chrome_changed.connect(self.header_col.set_bottom_pad)
         self.header_col.scrolled.connect(
@@ -981,12 +986,47 @@ class DAWWindow(QMainWindow):
         h.addWidget(self.lbl_gain)
         h.addStretch()
         self._set_inspector_enabled(False)
-        self.btn_clip_fx = QPushButton("FX…")
-        self.btn_clip_fx.setToolTip("Effects for this clip only")
+        self.btn_track_fx = QPushButton("Track FX…")
+        self.btn_track_fx.setToolTip(
+            "Effects for the selected track; matches its mixer channel")
+        self.btn_track_fx.clicked.connect(self._open_track_fx)
+        self.btn_track_fx.setEnabled(False)
+        h.addWidget(self.btn_track_fx)
+        self.btn_clip_fx = QPushButton("Clip FX…")
+        self.btn_clip_fx.setToolTip("Additional effects for this clip only")
         self.btn_clip_fx.clicked.connect(self._open_clip_fx)
         self.btn_clip_fx.setEnabled(False)
         h.addWidget(self.btn_clip_fx)
         return bar
+
+    def _selected_track(self):
+        if not self.selected_clip:
+            return None
+        clip, _item = self.selected_clip
+        return next(
+            (track for track in self.project.tracks
+             if any(item is clip for item in track.clips)), None)
+
+    def _open_track_fx(self):
+        track = self._selected_track()
+        if track is None:
+            self.status.setText("Select a clip on the track to edit its FX.")
+            return
+        dsp = self.dsp_chains.get(track.name)
+        if dsp is None:
+            self.status.setText(
+                "No mixer DSP chain found for '{}'.".format(track.name))
+            return
+        from ui.fx_dialog import TrackFxDialog
+        self._push_undo("Track effects")
+        dialog = TrackFxDialog(track, dsp, self)
+        dialog.dsp_changed.connect(
+            lambda _attr: self.mixer.sync_dsp(track))
+        dialog.exec()
+        self.mixer.sync_dsp(track)
+        self.status.setText(
+            "Updated '{}' track effects and mixer controls."
+            .format(track.name))
 
     def _open_clip_fx(self):
         if not self.selected_clip:
@@ -1188,6 +1228,7 @@ class DAWWindow(QMainWindow):
         self.track_headers = {}
         tracks = self.project.tracks
         self.scene.set_extent(len(tracks), self.project.total_duration)
+        self.scene.set_automation_tracks(tracks)
         for i, track in enumerate(tracks):
             color = COLORS["track_colors"].get(track.name, COLORS["accent"])
             for clip in track.clips:
@@ -1202,6 +1243,7 @@ class DAWWindow(QMainWindow):
             header.mute_toggled.connect(self.set_track_mute)
             header.solo_toggled.connect(self.set_track_solo)
             header.reorder_requested.connect(self.reorder_track)
+            header.remove_requested.connect(self.remove_track)
             self.header_col.add(header)
             self.track_headers[track.name] = header
         self.mixer.set_tracks(
@@ -1290,6 +1332,59 @@ class DAWWindow(QMainWindow):
         self._rebuild_ui()
         self.status.setText("Moved '{}'.".format(track.name))
 
+    def remove_track(self, name):
+        track = next(
+            (item for item in self.project.tracks if item.name == name),
+            None)
+        if track is None:
+            return
+        self._push_undo("Remove track")
+        self._halt_playback()
+        self.project.tracks.remove(track)
+        self.project.removed_tracks.append(track)
+        self.project._recompute_duration()
+        self.stem_paths.pop(track.name, None)
+        self._rebuild_ui()
+        self.status.setText(
+            "Removed '{}' from the set. Re-add it from the Track menu."
+            .format(track.name))
+
+    def readd_removed_track(self):
+        if not self.project.removed_tracks:
+            self.status.setText("There are no removed tracks to re-add.")
+            return
+        labels = [
+            "{}. {} ({} clip{})".format(
+                index + 1, track.name, len(track.clips),
+                "" if len(track.clips) == 1 else "s")
+            for index, track in enumerate(self.project.removed_tracks)
+        ]
+        label, accepted = QInputDialog.getItem(
+            self, "Re-add Removed Track", "Track to restore:",
+            labels, 0, False)
+        if not accepted:
+            return
+        index = labels.index(label)
+        track = self.project.removed_tracks[index]
+        self._push_undo("Re-add track")
+        self._halt_playback()
+        self.project.removed_tracks.pop(index)
+        original_name = track.name
+        existing = {item.name for item in self.project.tracks}
+        if track.name in existing:
+            suffix = 2
+            while "{}_{}".format(original_name, suffix) in existing:
+                suffix += 1
+            new_name = "{}_{}".format(original_name, suffix)
+            if track.name in self.dsp_chains:
+                self.dsp_chains[new_name] = self.dsp_chains.pop(track.name)
+            track.name = new_name
+        self.project.add_track(track)
+        if track.clips and track.clips[0].filepath:
+            self.stem_paths[track.name] = track.clips[0].filepath
+        self._rebuild_ui()
+        self.status.setText("Re-added '{}'.".format(track.name))
+
     def set_master_volume(self, gain):
         self.project.master_volume = gain
 
@@ -1301,6 +1396,8 @@ class DAWWindow(QMainWindow):
             self.selected_clip = None
             self.lbl_clip_name.setText("No clip selected")
             self._set_inspector_enabled(False)
+            if hasattr(self, "btn_track_fx"):
+                self.btn_track_fx.setEnabled(False)
             if hasattr(self, "btn_clip_fx"):
                 self.btn_clip_fx.setEnabled(False)
             return
@@ -1309,6 +1406,8 @@ class DAWWindow(QMainWindow):
         self.selected_clip = (clip, item)
         self.lbl_clip_name.setText(clip.stem_name.capitalize())
         self._set_inspector_enabled(True)
+        if hasattr(self, "btn_track_fx"):
+            self.btn_track_fx.setEnabled(self._selected_track() is not None)
         if hasattr(self, "btn_clip_fx"):
             self.btn_clip_fx.setEnabled(True)
         for w, v in ((self.spin_start, clip.start_time),
@@ -1991,7 +2090,7 @@ class DAWWindow(QMainWindow):
         chains = {}
         from core.dsp import DSPChain
         from core.project_io import apply_dsp_params
-        for track in project.tracks:
+        for track in project.tracks + project.removed_tracks:
             dsp = DSPChain(project.samplerate)
             apply_dsp_params(dsp, result.dsp_params.get(track.name, {}))
             chains[track.name] = dsp
@@ -2021,8 +2120,9 @@ class DAWWindow(QMainWindow):
                     os.path.basename(result.path), len(project.tracks)))
         else:
             self.status.setText(
-                "Opened {} ({} tracks).".format(
-                    os.path.basename(result.path), len(project.tracks)))
+                "Opened {} ({} active, {} removed tracks).".format(
+                    os.path.basename(result.path), len(project.tracks),
+                    len(project.removed_tracks)))
 
         QTimer.singleShot(0, lambda: self.view.fit_to(project.total_duration))
 
@@ -2038,14 +2138,14 @@ class DAWWindow(QMainWindow):
 
     def _push_undo(self, label):
         """Call before mutating project state."""
-        self.history.push(label, self.project)
+        self.history.push(label, self.project, self.dsp_chains)
 
     def undo(self):
         if not self.history.can_undo():
             self.status.setText("Nothing to undo.")
             return
         self._halt_playback()
-        result = self.history.undo(self.project)
+        result = self.history.undo(self.project, self.dsp_chains)
         if result is None:
             return
         label, restored = result
@@ -2057,7 +2157,7 @@ class DAWWindow(QMainWindow):
             self.status.setText("Nothing to redo.")
             return
         self._halt_playback()
-        result = self.history.redo(self.project)
+        result = self.history.redo(self.project, self.dsp_chains)
         if result is None:
             return
         label, restored = result
@@ -2067,13 +2167,23 @@ class DAWWindow(QMainWindow):
     def _install_project(self, project):
         """Adopt a Project (from undo/redo) and rebuild the UI."""
         self.project = project
+        self.stem_paths = {
+            track.name: track.clips[0].filepath
+            for track in project.tracks
+            if track.clips and track.clips[0].filepath
+        }
         for name in list(self.dsp_chains.keys()):
-            if not any(t.name == name for t in project.tracks):
+            if not any(t.name == name
+                       for t in project.tracks + project.removed_tracks):
                 del self.dsp_chains[name]
         from core.dsp import DSPChain
-        for track in project.tracks:
+        for track in project.tracks + project.removed_tracks:
             if track.name not in self.dsp_chains:
                 self.dsp_chains[track.name] = DSPChain(project.samplerate)
+        from core.project_io import apply_dsp_params
+        for name, params in project.history_dsp_chains.items():
+            if name in self.dsp_chains:
+                apply_dsp_params(self.dsp_chains[name], params)
         self._rebuild_ui()
         # Recovery: clear any stale render from a previous session
         for _t in self.project.tracks:
@@ -2084,6 +2194,30 @@ class DAWWindow(QMainWindow):
 
         if any(c.needs_render() for t in project.tracks for c in t.clips):
             self._request_render()
+
+
+    def set_automation_mode(self, parameter):
+        self.view.set_automation_mode(parameter)
+        if parameter == "volume":
+            label = "Volume"
+        elif parameter == "pan":
+            label = "Pan"
+        else:
+            label = None
+        self.status.setText(
+            "Editing {} automation: click/drag to add or move; "
+            "right-click a point to delete."
+            .format(label) if label else "Automation editing off.")
+
+    def _on_automation_edit_started(self, parameter):
+        self.history.push(
+            "Edit {} automation".format(parameter), self.project)
+
+    def _on_automation_changed(self, index, parameter, _points):
+        if not 0 <= index < len(self.project.tracks):
+            return
+        self.status.setText(
+            "Updated {} automation.".format(parameter))
 
 
     def export_stems(self):

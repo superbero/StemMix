@@ -90,6 +90,7 @@ class Track:
         self.soloed = False
         self.volume = 1.0
         self.pan = 0.0  # -1 (left) .. +1 (right), balance law
+        self.automation = {"volume": [], "pan": []}
 
     def add_clip(self, clip):
         self.clips.append(clip)
@@ -107,6 +108,8 @@ class Project:
 
     def __init__(self):
         self.tracks = []
+        self.removed_tracks = []
+        self.history_dsp_chains = {}
         self.samplerate = 44100
         self.loop = LoopRegion()
         self.sections = []

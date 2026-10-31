@@ -1,14 +1,14 @@
 """Palette and stylesheet. Graphite theme, one blue accent."""
 COLORS = {
-    "bg": "#16171a",
-    "bg_alt": "#1d1e22",
-    "bg_card": "#26272c",
-    "bg_hover": "#303138",
-    "border": "#2c2d33",
-    "text": "#e4e5ea",
-    "text_dim": "#8b8d97",
-    "accent": "#4d9bff",
-    "accent_hover": "#76b3ff",
+    "bg": "#14171c",
+    "bg_alt": "#1b2027",
+    "bg_card": "#242b35",
+    "bg_hover": "#303a47",
+    "border": "#303945",
+    "text": "#edf1f7",
+    "text_dim": "#9aa6b5",
+    "accent": "#579dff",
+    "accent_hover": "#78b1ff",
     "success": "#4cd38a",
     "warning": "#f0b655",
     "danger": "#f06565",
@@ -57,10 +57,17 @@ QLabel#position_label {
 QPushButton {
     background-color: %(bg_card)s; color: %(text)s;
     border: 1px solid %(border)s; border-radius: 6px;
-    padding: 6px 14px; font-size: 12px; font-weight: 500;
+    padding: 7px 14px; font-size: 12px; font-weight: 500;
 }
-QPushButton:hover { background-color: %(bg_hover)s; }
-QPushButton:pressed { background-color: %(bg_alt)s; }
+QPushButton:hover {
+    background-color: %(bg_hover)s; border-color: #465466;
+}
+QPushButton:pressed {
+    background-color: %(bg_alt)s; border-color: %(accent)s;
+}
+QPushButton:focus {
+    border: 1px solid %(accent)s;
+}
 QPushButton:disabled { color: #5a5c64; background-color: %(bg_alt)s; }
 QPushButton#primary {
     background-color: %(accent)s; color: #ffffff;
@@ -101,7 +108,7 @@ QPushButton#msButton[kind="solo"]:checked {
 
 QFrame#transport { background-color: %(bg_alt)s;
                    border-bottom: 1px solid %(border)s; }
-QLabel#brand { font-size: 15px; font-weight: 700; color: %(text)s; }
+QLabel#brand { font-size: 16px; font-weight: 700; color: %(text)s; }
 QLabel#timecode {
     font-family: "SF Mono", "Menlo", "Consolas", monospace;
     font-size: 24px; font-weight: 500; color: %(text)s;
@@ -110,10 +117,10 @@ QLabel#timecodeDim {
     font-family: "SF Mono", "Menlo", "Consolas", monospace;
     font-size: 13px; color: %(text_dim)s;
 }
-QFrame#timeBox { background-color: #101114; border: 1px solid %(border)s;
+QFrame#timeBox { background-color: #11151a; border: 1px solid %(border)s;
                  border-radius: 8px; }
 QFrame#timeBox QLabel { background: transparent; }
-QFrame#stepper { background-color: #101114;
+QFrame#stepper { background-color: #11151a;
                  border: 1px solid %(border)s; border-radius: 8px; }
 QFrame#stepper QLabel { background: transparent; }
 QFrame#stepper QPushButton#tiny { background: transparent; border: none;
@@ -153,12 +160,12 @@ QWidget#headerInner { background-color: %(lane_b)s; }
 QFrame#mixer { background-color: %(bg_alt)s;
                border-top: 1px solid %(border)s; }
 QWidget#mixerHolder { background: transparent; }
-QFrame#strip { background-color: #222328; border: 1px solid %(border)s;
+QFrame#strip { background-color: #202630; border: 1px solid %(border)s;
                border-radius: 8px; }
 QLabel#dbReadout {
     font-family: "SF Mono", "Menlo", "Consolas", monospace;
     font-size: 10px; color: %(text_dim)s;
-    background-color: #101114; border-radius: 4px; padding: 1px 0;
+    background-color: #11151a; border-radius: 4px; padding: 1px 0;
 }
 
 QScrollArea { background: transparent; border: none; }
@@ -216,4 +223,52 @@ QComboBox QAbstractItemView { background-color: %(bg_card)s;
     selection-background-color: %(accent)s; padding: 4px; outline: none; }
 QFrame#fxGroup { background-color: %(bg_alt)s;
                  border: 1px solid %(border)s; border-radius: 8px; }
+
+QToolButton {
+    color: %(text_dim)s; background: transparent;
+    border: 1px solid transparent; border-radius: 6px;
+    padding: 5px;
+}
+QToolButton:hover {
+    color: %(text)s; background-color: %(bg_hover)s;
+    border-color: %(border)s;
+}
+QToolButton:pressed { background-color: %(bg_card)s; }
+QListWidget, QTreeWidget, QTableWidget {
+    background-color: %(bg_alt)s; alternate-background-color: %(bg)s;
+    border: 1px solid %(border)s; border-radius: 7px;
+    outline: none; selection-background-color: #294d76;
+    selection-color: %(text)s; padding: 3px;
+}
+QListWidget::item, QTreeWidget::item, QTableWidget::item {
+    padding: 5px 7px; border-radius: 4px;
+}
+QListWidget::item:hover, QTreeWidget::item:hover,
+QTableWidget::item:hover { background-color: %(bg_hover)s; }
+QHeaderView::section {
+    background-color: %(bg_card)s; color: %(text_dim)s;
+    border: none; border-bottom: 1px solid %(border)s;
+    padding: 7px 9px; font-size: 11px; font-weight: 600;
+}
+QTabWidget::pane {
+    background-color: %(bg_alt)s; border: 1px solid %(border)s;
+    border-radius: 7px; top: -1px;
+}
+QTabBar::tab {
+    color: %(text_dim)s; background-color: %(bg)s;
+    border: 1px solid transparent; border-bottom: none;
+    padding: 8px 13px; margin-right: 3px;
+}
+QTabBar::tab:hover { color: %(text)s; background-color: %(bg_hover)s; }
+QTabBar::tab:selected {
+    color: %(text)s; background-color: %(bg_alt)s;
+    border-color: %(border)s; border-bottom-color: %(bg_alt)s;
+}
+QMenu {
+    background-color: %(bg_card)s; color: %(text)s;
+    border: 1px solid %(border)s; padding: 5px;
+}
+QMenu::item { padding: 6px 28px 6px 10px; border-radius: 4px; }
+QMenu::item:selected { background-color: %(bg_hover)s; }
+QMenu::separator { height: 1px; background: %(border)s; margin: 4px 7px; }
 """ % COLORS

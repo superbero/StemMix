@@ -62,10 +62,12 @@ def save_project_dialog(window, save_as=False):
     If `save_as` is False and the project already has a path, saves
     directly. Otherwise prompts for a path. Returns the path or None.
     """
-    if not getattr(window, "project", None) or not window.project.tracks:
+    if (not getattr(window, "project", None)
+            or not (window.project.tracks
+                    or window.project.removed_tracks)):
         QMessageBox.information(
             window, "Nothing to save",
-            "Load some stems first — there is no project to save yet.")
+            "Load or import audio first — there is no project to save yet.")
         return None
 
     path = getattr(window, "project_path", None)
@@ -123,10 +125,10 @@ def open_project_dialog(window):
             "Unexpected error while reading the file:\n\n" + str(e))
         return None
 
-    if not result.project.tracks:
+    if not (result.project.tracks or result.project.removed_tracks):
         QMessageBox.warning(
             window, "Empty project",
-            "The project file contains no tracks.")
+            "The project file contains no active or removed tracks.")
         return None
 
     if result.missing:

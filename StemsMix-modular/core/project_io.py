@@ -119,6 +119,10 @@ def _track_to_dict(track, dsp):
         "pan": float(track.pan),
         "muted": bool(track.muted),
         "soloed": bool(track.soloed),
+        "automation": {
+            parameter: [list(point) for point in points]
+            for parameter, points in track.automation.items()
+        },
         "dsp": _dsp_to_dict(dsp),
         "clips": [_clip_to_dict(c) for c in track.clips],
     }
@@ -154,6 +158,11 @@ def serialize_project(project, dsp_chains):
         "tracks": [
             _track_to_dict(t, dsp_chains[t.name])
             for t in project.tracks
+            if t.name in dsp_chains
+        ],
+        "removed_tracks": [
+            _track_to_dict(t, dsp_chains[t.name])
+            for t in project.removed_tracks
             if t.name in dsp_chains
         ],
     }
@@ -264,65 +273,74 @@ def load_project(path):
     dsp_params = {}
     missing = []
 
-    for tdata in data.get("tracks", []):
-        name = tdata.get("name")
-        if not name:
-            continue
-        track = Track(name, color_hint=None)
-        track.volume = float(tdata.get("volume", 1.0))
-        track.pan = float(tdata.get("pan", 0.0))
-        track.muted = bool(tdata.get("muted", False))
-        track.soloed = bool(tdata.get("soloed", False))
+    for field, destination in (
+            ("tracks", project.tracks),
+            ("removed_tracks", project.removed_tracks)):
+        for tdata in data.get(field, []):
+            name = tdata.get("name")
+            if not name:
+                continue
+            track = Track(name, color_hint=None)
+            track.volume = float(tdata.get("volume", 1.0))
+            track.pan = float(tdata.get("pan", 0.0))
+            track.muted = bool(tdata.get("muted", False))
+            track.soloed = bool(tdata.get("soloed", False))
+            from .automation import normalize_points
+            raw_automation = tdata.get("automation", {}) or {}
+            if not isinstance(raw_automation, dict):
+                raw_automation = {}
+            track.automation = {
+                parameter: normalize_points(
+                    raw_automation.get(parameter, []), parameter)
+                for parameter in ("volume", "pan")
+            }
 
-        dsp_params[name] = dict(tdata.get("dsp", {}) or {})
+            dsp_params[name] = dict(tdata.get("dsp", {}) or {})
 
-        for cdata in tdata.get("clips", []):
-            filepath = cdata.get("filepath")
-            stem_name = cdata.get("stem_name") or name
+            for cdata in tdata.get("clips", []):
+                filepath = cdata.get("filepath")
+                stem_name = cdata.get("stem_name") or name
 
-            audio = None
-            try:
-                if filepath and os.path.exists(filepath):
-                    audio, sr = load_audio(filepath)
-                    if sr != project.samplerate:
-                        # Trust the file; the project's samplerate is a
-                        # hint, not a constraint. Mixed rates across
-                        # tracks would be unusual, but this keeps what
-                        # the file actually contains.
-                        project.samplerate = sr
+                audio = None
+                try:
+                    if filepath and os.path.exists(filepath):
+                        audio, sr = load_audio(filepath)
+                        if sr != project.samplerate:
+                            project.samplerate = sr
+                    else:
+                        missing.append((name, filepath or "(no path)"))
+                except Exception as e:
+                    missing.append((name, "{}: {}".format(filepath, e)))
+
+                if audio is None:
+                    import numpy as np
+                    audio = np.zeros((1, 2), dtype="float32")
+
+                clip = Clip(stem_name, filepath or "", audio,
+                            project.samplerate,
+                            start_time=float(cdata.get("start_time", 0.0)))
+                clip.stretch = float(cdata.get("stretch", 1.0))
+                clip.semitones = float(cdata.get("semitones", 0.0))
+                clip.gain = float(cdata.get("gain", 1.0))
+                clip.muted = bool(cdata.get("muted", False))
+                clip.soloed = bool(cdata.get("soloed", False))
+                clip.color_hint = cdata.get("color_hint")
+                clip.fade_in_seconds = float(
+                    cdata.get("fade_in", 0.0))
+                clip.fade_out_seconds = float(
+                    cdata.get("fade_out", 0.0))
+                if (filepath and (name, filepath) in missing
+                        or audio.shape == (1, 2)):
+                    clip.missing = True
                 else:
-                    missing.append((name, filepath or "(no path)"))
-            except Exception as e:
-                missing.append((name, "{}: {}".format(filepath, e)))
+                    clip.missing = False
 
-            if audio is None:
-                # Placeholder: 1 frame of silence. Keeps the clip in the
-                # project (with its parameters) so the user can relink
-                # the file later without losing edits.
-                import numpy as np
-                audio = np.zeros((1, 2), dtype="float32")
+                track.add_clip(clip)
 
-            clip = Clip(stem_name, filepath or "", audio,
-                        project.samplerate,
-                        start_time=float(cdata.get("start_time", 0.0)))
-            clip.stretch = float(cdata.get("stretch", 1.0))
-            clip.semitones = float(cdata.get("semitones", 0.0))
-            clip.gain = float(cdata.get("gain", 1.0))
-            clip.muted = bool(cdata.get("muted", False))
-            clip.soloed = bool(cdata.get("soloed", False))
-            clip.color_hint = cdata.get("color_hint")
-            clip.fade_in_seconds = float(
-                cdata.get("fade_in", 0.0))
-            clip.fade_out_seconds = float(
-                cdata.get("fade_out", 0.0))
-            if filepath and (name, filepath) in missing or audio.shape == (1, 2):
-                clip.missing = True
+            if field == "tracks":
+                project.add_track(track)
             else:
-                clip.missing = False
-
-            track.add_clip(clip)
-
-        project.add_track(track)
+                destination.append(track)
 
     project._recompute_duration()
     return ProjectLoadResult(project, dsp_params, missing, path)

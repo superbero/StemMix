@@ -79,11 +79,20 @@ class ChannelStrip(_StripBase):
         super().__init__(track.name.capitalize(), color, parent)
         self.name = track.name
         self.dsp = dsp
+        self.dsp_knobs = {}
+        self._dsp_scales = {
+            "eq_bass": 1.0,
+            "eq_mid": 1.0,
+            "eq_treble": 1.0,
+            "comp_threshold": -1.0,
+            "reverb_mix": 100.0,
+        }
 
         def dsp_knob(label, lo, hi, attr, scale=1.0, fmt="{:+.0f} dB",
                      default=0.0, bipolar=True, eq=False):
             k = Knob(label, lo, hi, getattr(dsp, attr) * scale, default,
                      fmt, color, 28, bipolar)
+            self.dsp_knobs[attr] = k
 
             def on_change(v):
                 setattr(dsp, attr, v / scale)
@@ -132,6 +141,11 @@ class ChannelStrip(_StripBase):
         self._fader_block(track.volume)
         self.fader.valueChanged.connect(
             lambda g: self.volume_changed.emit(self.name, g))
+
+    def sync_dsp(self):
+        for attr, knob in self.dsp_knobs.items():
+            knob.set_value(
+                getattr(self.dsp, attr) * self._dsp_scales[attr])
 
     @staticmethod
     def _ms(text, kind, checked):
@@ -220,6 +234,12 @@ class MixerPanel(QFrame):
         if s:
             s.set_muted(track.muted)
             s.set_soloed(track.soloed)
+            s.sync_dsp()
+
+    def sync_dsp(self, track):
+        strip = self.strips.get(track.name)
+        if strip:
+            strip.sync_dsp()
 
     def update_levels(self, levels, master):
         for name, s in self.strips.items():

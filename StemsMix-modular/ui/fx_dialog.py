@@ -1,16 +1,14 @@
 """Track effects dialog.
 
-Edits the DSPChain that lives on a Track. This replaces the earlier
-per-clip effects design: effects belong to tracks (as in Logic, Ableton,
-Reaper), and the DSPChain on each track is already what the engine
-applies during playback and export.
+Edits the DSPChain shared by a Track and its mixer channel. The separate
+clip-effects dialog handles effects that apply only to one clip.
 
 Changes are applied live as the user drags a knob, so the dialog can
 stay open while the transport plays. Cancel does not undo live changes
 — that's what undo is for. The DAW pushes an undo snapshot before
 opening the dialog.
 """
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QLabel,
                              QDialogButtonBox, QFrame)
 
@@ -26,6 +24,7 @@ class TrackFxDialog(QDialog):
     """Edits a Track's DSPChain in place. Uses the same knob widgets as
     the mixer's channel strips so a user sees identical controls in both
     places."""
+    dsp_changed = pyqtSignal(str)
 
     def __init__(self, track, dsp, parent=None):
         super().__init__(parent)
@@ -109,6 +108,7 @@ class TrackFxDialog(QDialog):
             setattr(self.dsp, attr, v / scale)
             if eq:
                 self.dsp._filters_dirty = True
+            self.dsp_changed.emit(attr)
         k.valueChanged.connect(on_change)
         row.addWidget(k)
         return k
@@ -118,6 +118,7 @@ class TrackFxDialog(QDialog):
                      "comp_threshold", "reverb_mix"):
             setattr(self.dsp, attr, 0.0)
         self.dsp._filters_dirty = True
+        self.dsp_changed.emit("*")
         # Reset the visible knobs too, without re-emitting change events
         for knob, attr, scale in (
                 (self.eq_bass, "eq_bass", 1.0),

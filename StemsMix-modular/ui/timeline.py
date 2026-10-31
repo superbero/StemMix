@@ -251,12 +251,16 @@ class PlayheadItem(QGraphicsItem):
 
 class TimelineScene(QGraphicsScene):
     clip_moved = pyqtSignal()
+    automation_edit_started = pyqtSignal(str)
+    automation_changed = pyqtSignal(int, str, list)
 
     def __init__(self, num_tracks=6, parent=None):
         super().__init__(parent)
         self.num_tracks = num_tracks
         self._capacity_seconds = 0.0
         self.clips = []
+        self.automation_tracks = []
+        self.automation_mode = None
         self._beat_x = None          # scene x of every beat (or None)
         self._down_x = None          # scene x of downbeats only
         self.playhead = PlayheadItem(num_tracks * TRACK_HEIGHT)
@@ -350,6 +354,69 @@ class TimelineScene(QGraphicsScene):
             self.removeItem(c)
         self.clips.clear()
 
+    def set_automation_tracks(self, tracks):
+        self.automation_tracks = list(tracks)
+        self.update()
+
+    def set_automation_mode(self, parameter):
+        self.automation_mode = parameter
+        self.update()
+
+    def drawForeground(self, painter, rect):
+        parameter = self.automation_mode
+        if parameter not in ("volume", "pan"):
+            return
+        painter.save()
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        sx = max(0.01, abs(painter.worldTransform().m11()))
+        colors = {"volume": "#65d69a", "pan": "#55d6cf"}
+        color = QColor(colors[parameter])
+        curve_pen = QPen(color, 2)
+        curve_pen.setCosmetic(True)
+        baseline_pen = QPen(color.darker(190), 1, Qt.PenStyle.DashLine)
+        baseline_pen.setCosmetic(True)
+        for index, track in enumerate(self.automation_tracks):
+            top = index * TRACK_HEIGHT
+            bottom = top + TRACK_HEIGHT
+            if bottom < rect.top() or top > rect.bottom():
+                continue
+            points = track.automation.get(parameter, [])
+            if parameter == "volume":
+                point_y = lambda value: (bottom - 10
+                                         - max(0.0, min(1.5, value))
+                                         / 1.5 * (TRACK_HEIGHT - 20))
+                baseline_y = point_y(1.0)
+            else:
+                point_y = lambda value: (
+                    top + TRACK_HEIGHT / 2.0
+                    - max(-1.0, min(1.0, value))
+                    * (TRACK_HEIGHT / 2.0 - 10))
+                baseline_y = point_y(0.0)
+            painter.setPen(baseline_pen)
+            painter.drawLine(QPointF(rect.left(), baseline_y),
+                            QPointF(rect.right(), baseline_y))
+            if not points:
+                value = (1.0 if parameter == "volume" else track.pan)
+                points = [[0.0, value]]
+            elif points[0][0] > 0:
+                default = (1.0 if parameter == "volume" else track.pan)
+                points = [[0.0, default]] + points
+            path = QPainterPath()
+            for position, (time, value) in enumerate(points):
+                point = QPointF(time_to_x(time), point_y(value))
+                if position == 0:
+                    path.moveTo(point)
+                else:
+                    path.lineTo(point)
+            painter.setPen(curve_pen)
+            painter.drawPath(path)
+            painter.setBrush(color)
+            for time, value in points:
+                painter.drawEllipse(
+                    QPointF(time_to_x(time), point_y(value)),
+                    4.0 / sx, 4.0 / sx)
+        painter.restore()
+
 
 class TimelineView(QGraphicsView):
     zoom_changed = pyqtSignal(float)
@@ -369,6 +436,115 @@ class TimelineView(QGraphicsView):
         self.setTransformationAnchor(
             QGraphicsView.ViewportAnchor.AnchorUnderMouse)
         self.zoom = 1.0
+        self._automation_drag = None
+
+    def set_automation_mode(self, parameter):
+        self.scene().set_automation_mode(parameter)
+        self.viewport().setCursor(
+            Qt.CursorShape.CrossCursor if parameter
+            else Qt.CursorShape.ArrowCursor)
+
+    @staticmethod
+    def _automation_value(parameter, y, track_index):
+        top = track_index * TRACK_HEIGHT
+        if parameter == "volume":
+            fraction = (top + TRACK_HEIGHT - 10 - y) / (TRACK_HEIGHT - 20)
+            return max(0.0, min(1.5, fraction * 1.5))
+        value = ((top + TRACK_HEIGHT / 2.0 - y)
+                 / (TRACK_HEIGHT / 2.0 - 10))
+        return max(-1.0, min(1.0, value))
+
+    @staticmethod
+    def _automation_y(parameter, value, track_index):
+        top = track_index * TRACK_HEIGHT
+        if parameter == "volume":
+            return (top + TRACK_HEIGHT - 10
+                    - max(0.0, min(1.5, value))
+                    / 1.5 * (TRACK_HEIGHT - 20))
+        return (top + TRACK_HEIGHT / 2.0
+                - max(-1.0, min(1.0, value))
+                * (TRACK_HEIGHT / 2.0 - 10))
+
+    def _automation_mouse_press(self, event):
+        scene = self.scene()
+        parameter = scene.automation_mode
+        if (parameter not in ("volume", "pan")
+                or event.button() not in (
+                    Qt.MouseButton.LeftButton,
+                    Qt.MouseButton.RightButton)):
+            return False
+        position = self.mapToScene(event.position().toPoint())
+        index = int(position.y() // TRACK_HEIGHT)
+        if index < 0 or index >= len(scene.automation_tracks):
+            return False
+        track = scene.automation_tracks[index]
+        points = track.automation.setdefault(parameter, [])
+        nearest = None
+        nearest_distance = 10.0 / max(self.zoom, 0.01)
+        for point in points:
+            px = time_to_x(point[0])
+            py = self._automation_y(parameter, point[1], index)
+            distance = math.hypot(position.x() - px, position.y() - py)
+            if distance < nearest_distance:
+                nearest = point
+                nearest_distance = distance
+
+        if event.button() == Qt.MouseButton.RightButton:
+            if nearest is None:
+                return False
+            scene.automation_edit_started.emit(
+                "Delete {} automation point".format(parameter))
+            points.remove(nearest)
+            scene.automation_changed.emit(
+                index, parameter, [list(point) for point in points])
+            scene.update()
+            event.accept()
+            return True
+
+        scene.automation_edit_started.emit(
+            "{} automation".format(parameter.capitalize()))
+        if nearest is None:
+            nearest = [0.0, 0.0]
+            points.append(nearest)
+        nearest[0] = max(0.0, x_to_time(position.x()))
+        nearest[1] = self._automation_value(
+            parameter, position.y(), index)
+        points.sort(key=lambda point: point[0])
+        self._automation_drag = (index, parameter, nearest)
+        scene.automation_changed.emit(
+            index, parameter, [list(point) for point in points])
+        scene.update()
+        event.accept()
+        return True
+
+    def mousePressEvent(self, event):
+        if self._automation_mouse_press(event):
+            return
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        if self._automation_drag is None:
+            super().mouseMoveEvent(event)
+            return
+        index, parameter, point = self._automation_drag
+        position = self.mapToScene(event.position().toPoint())
+        track = self.scene().automation_tracks[index]
+        point[0] = max(0.0, x_to_time(position.x()))
+        point[1] = self._automation_value(parameter, position.y(), index)
+        points = track.automation[parameter]
+        points.sort(key=lambda item: item[0])
+        self.scene().automation_changed.emit(
+            index, parameter, [list(item) for item in points])
+        self.scene().update()
+        event.accept()
+
+    def mouseReleaseEvent(self, event):
+        if (self._automation_drag is not None
+                and event.button() == Qt.MouseButton.LeftButton):
+            self._automation_drag = None
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
 
     def resizeEvent(self, e):
         super().resizeEvent(e)
@@ -565,6 +741,7 @@ class TrackHeader(QFrame):
     mute_toggled = pyqtSignal(str, bool)
     solo_toggled = pyqtSignal(str, bool)
     reorder_requested = pyqtSignal(str, int)
+    remove_requested = pyqtSignal(str)
 
     def __init__(self, stem_name, color_hex, parent=None):
         super().__init__(parent)
@@ -591,12 +768,20 @@ class TrackHeader(QFrame):
         row.setSpacing(4)
         self.mute_btn = self._ms("M", "mute")
         self.solo_btn = self._ms("S", "solo")
+        self.remove_btn = QPushButton("×")
+        self.remove_btn.setObjectName("tiny")
+        self.remove_btn.setToolTip(
+            "Remove from the set. Re-add it later from the Track menu.")
+        self.remove_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.remove_btn.clicked.connect(
+            lambda: self.remove_requested.emit(self.stem_name))
         self.mute_btn.toggled.connect(
             lambda c: self.mute_toggled.emit(self.stem_name, c))
         self.solo_btn.toggled.connect(
             lambda c: self.solo_toggled.emit(self.stem_name, c))
         row.addWidget(self.mute_btn)
         row.addWidget(self.solo_btn)
+        row.addWidget(self.remove_btn)
         row.addStretch()
         body.addLayout(row)
         body.addStretch()

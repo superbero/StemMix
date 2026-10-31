@@ -46,3 +46,23 @@ two-output vocal/accompaniment workflow, or drum-kit parts. The vocal
 accompaniment is assembled from the selected Demucs model's outputs; it does
 not isolate lead and backing vocals. Drum-kit parts use the optional
 `mdxnet-infer` model after the main separator isolates drums.
+
+## Track automation
+
+Choose **Automation → Track Volume** or **Track Pan**, then click or drag
+keyframes over a track in the arrange view; right-click a point to remove it.
+Volume is drawn from silence to +3.5 dB; pan ranges from full left to full
+right. Keyframes are interpolated during playback and mix/stem export, and
+are saved with the project and undo history. Choose **Automation Off** to
+move and select clips normally.
+
+## Track management
+
+Use the **×** button in a track header to remove a track from the current set.
+This keeps the track and its settings in the project; restore it with
+**Track → Re-add Removed Track…**. You can also use **Track → Add Audio
+Track…** to import audio again from a file.
+
+The clip inspector has separate **Track FX…** and **Clip FX…** buttons.
+Track effects edit the same DSP chain shown by the selected track's mixer
+channel, and changes update that channel's controls live.
