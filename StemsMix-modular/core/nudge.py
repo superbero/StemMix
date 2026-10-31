@@ -3,7 +3,7 @@ import math
 
 
 def quantize_time(t, beats, mode="nearest"):
-    if not beats:
+    if beats is None or len(beats) == 0:
         return t
     import bisect
     i = bisect.bisect_left(beats, t)

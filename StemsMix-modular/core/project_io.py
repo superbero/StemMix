@@ -44,6 +44,7 @@ Schema version 1:
 """
 import datetime
 import json
+import math
 import os
 
 from .audio_io import load_audio
@@ -146,6 +147,9 @@ def serialize_project(project, dsp_chains):
             "beats_per_bar": int(project.beats_per_bar),
             "downbeat_phase": int(project.downbeat_phase),
             "loop": project.loop.to_dict(),
+            "sections": [section.to_dict()
+                         for section in project.sections],
+            "count_in_bars": int(project.count_in_bars),
         },
         "tracks": [
             _track_to_dict(t, dsp_chains[t.name])
@@ -234,6 +238,28 @@ def load_project(path):
     project.downbeat_phase = int(pdata.get("downbeat_phase", 0))
     from .loop import LoopRegion
     project.loop = LoopRegion.from_dict(pdata.get("loop"))
+    try:
+        project.count_in_bars = max(
+            0, min(4, int(pdata.get("count_in_bars", 0))))
+    except (TypeError, ValueError):
+        project.count_in_bars = 0
+    from .timeline_model import SectionMarker
+    raw_sections = pdata.get("sections", [])
+    if isinstance(raw_sections, list):
+        for section in raw_sections:
+            if not isinstance(section, dict):
+                continue
+            try:
+                marker = SectionMarker(
+                    str(section["name"]).strip(),
+                    float(section["start"]),
+                    float(section["end"]))
+            except (KeyError, TypeError, ValueError):
+                continue
+            if (marker.name and math.isfinite(marker.start)
+                    and math.isfinite(marker.end)
+                    and 0 <= marker.start < marker.end):
+                project.sections.append(marker)
 
     dsp_params = {}
     missing = []

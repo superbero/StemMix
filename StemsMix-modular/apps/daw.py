@@ -19,9 +19,10 @@ from core.stem_export import export_stems
 from PyQt6.QtCore import Qt, QSize, QThread, QTimer, pyqtSignal
 from PyQt6.QtGui import QKeySequence, QShortcut
 from PyQt6.QtWidgets import (QApplication, QDialog, QDoubleSpinBox, QFileDialog,
-                             QFrame, QGridLayout, QHBoxLayout, QLabel,
-                             QMainWindow, QProgressBar, QPushButton,
-                             QSlider, QSplitter, QVBoxLayout, QWidget)
+                             QComboBox, QFrame, QGridLayout, QHBoxLayout,
+                             QInputDialog, QLabel, QMainWindow, QMessageBox,
+                             QProgressBar, QPushButton, QSlider, QSplitter,
+                             QStackedLayout, QVBoxLayout, QWidget)
 
 from ui.style import COLORS, QSS
 from ui.dialogs import (PrerequisiteDialog, ExportDialog,
@@ -32,6 +33,7 @@ from ui.workers import (DrumSplitWorker, DrumPreloadWorker,
 from ui.timeline import (TimelineScene, TimelineView, TimeRuler,
                          ChordStrip, CHORD_HEIGHT, TrackHeader, TrackHeaderColumn, HEADER_WIDTH,
                          RULER_HEIGHT, time_to_x)
+from ui.loop_markers import LoopMarkers
 from ui.channel_strip import MixerPanel
 from ui.widgets import make_icon, Stepper
 from core.resources import (run_prerequisite_checks,
@@ -40,7 +42,7 @@ from core.dsp import DSPChain
 from core.export import EXPORT_FORMATS, encode_with_ffmpeg
 from core.audio_io import load_audio
 from core import beats as beat_tools
-from core.timeline_model import Clip, Track, Project
+from core.timeline_model import Clip, Track, Project, SectionMarker
 from core.timestretch import (render_clips, clip_needs_work,
                               available_backend, INSTALL_HINT)
 from core.engine import TimelineEngine
@@ -163,7 +165,6 @@ class DAWWindow(QMainWindow):
         self._project_shortcuts = install_project_shortcuts(self)
         self._install_nudge_shortcuts()
         self.stem_export_worker = None
-                  # <-- add this line inside __init__
 
     # ------------------------------------------------------------------ UI
     def init_ui(self):
@@ -174,6 +175,7 @@ class DAWWindow(QMainWindow):
         root.setSpacing(0)
         root.addWidget(self._build_transport())
         root.addWidget(self._build_songbar())
+        root.addWidget(self._build_sectionbar())
 
         top = QWidget()
         top_l = QVBoxLayout(top)
@@ -208,7 +210,7 @@ class DAWWindow(QMainWindow):
     def import_stems(self):
         """Import additional audio files into the project."""
         from ui.import_stems_dialog import ImportStemsDialog
-        from core.audio_io import load_audio
+        from core.audio_io import load_audio, resample_audio
         from core.timeline_model import Clip, Track
         from core.dsp import DSPChain
 
@@ -227,16 +229,25 @@ class DAWWindow(QMainWindow):
         mode = dlg.import_mode()
         target = dlg.target_track_name()
 
-        self._push_undo("Import stems")
-        self._halt_playback()
-
         added_tracks = 0
         added_clips = 0
         failed = []
+        undo_pushed = False
+
+        def prepare_mutation():
+            nonlocal undo_pushed
+            if not undo_pushed:
+                self._push_undo("Import stems")
+                self._halt_playback()
+                undo_pushed = True
 
         for path in files:
             try:
                 data, sr = load_audio(path)
+                target_sr = self.project.samplerate
+                if sr != target_sr:
+                    data = resample_audio(data, sr, target_sr)
+                    sr = target_sr
             except Exception as e:
                 failed.append((path, str(e)))
                 continue
@@ -251,6 +262,7 @@ class DAWWindow(QMainWindow):
                 while name in existing:
                     suffix += 1
                     name = "{}_{}".format(base, suffix)
+                prepare_mutation()
                 track = Track(name)
                 clip = Clip(name, path, data, sr, start_time=playhead)
                 track.add_clip(clip)
@@ -265,9 +277,18 @@ class DAWWindow(QMainWindow):
                 if track is None:
                     failed.append((path, "target track gone"))
                     continue
+                prepare_mutation()
                 clip = Clip(target, path, data, sr, start_time=playhead)
                 track.add_clip(clip)
                 added_clips += 1
+
+        if not undo_pushed:
+            details = "; ".join(
+                "{}: {}".format(os.path.basename(path), error)
+                for path, error in failed[:3])
+            self.status.setText(
+                "Import failed" + (": " + details if details else "."))
+            return
 
         self.project._recompute_duration()
         self._rebuild_ui()
@@ -282,6 +303,101 @@ class DAWWindow(QMainWindow):
             for p, err in failed[:3]:
                 print("Import failed for {}: {}".format(p, err))
         self.status.setText("Imported " + ", ".join(summary) + ".")
+
+    def import_track_from_project(self):
+        """Add one complete track from another StemsMix project."""
+        from core.audio_io import load_audio, resample_audio
+        from core.dsp import DSPChain
+        from core.project_io import (ProjectLoadError, apply_dsp_params,
+                                     load_project)
+        from core.timeline_model import Clip, Track
+
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Import Track from Project", os.path.expanduser("~"),
+            "StemsMix Project (*.stemmix)")
+        if not path:
+            return
+        try:
+            result = load_project(path)
+        except (ProjectLoadError, OSError, ValueError) as e:
+            QMessageBox.warning(self, "Cannot import track", str(e))
+            return
+        if not result.project.tracks:
+            QMessageBox.information(
+                self, "No tracks", "The selected project contains no tracks.")
+            return
+
+        labels = [
+            "{}. {} ({} clip{})".format(
+                i + 1, track.name, len(track.clips),
+                "" if len(track.clips) == 1 else "s")
+            for i, track in enumerate(result.project.tracks)
+        ]
+        label, accepted = QInputDialog.getItem(
+            self, "Choose Track", "Track to add:", labels, 0, False)
+        if not accepted:
+            return
+        source_track = result.project.tracks[labels.index(label)]
+        if not source_track.clips:
+            QMessageBox.information(
+                self, "Empty track", "The selected track contains no clips.")
+            return
+        if any(getattr(clip, "missing", False) for clip in source_track.clips):
+            QMessageBox.warning(
+                self, "Missing audio",
+                "The selected track has missing source audio and cannot be "
+                "imported.")
+            return
+
+        target_sr = (self.project.samplerate if self.project.tracks
+                     else result.project.samplerate)
+        imported = Track(source_track.name, source_track.color_hint)
+        imported.volume = source_track.volume
+        imported.pan = source_track.pan
+        imported.muted = source_track.muted
+        imported.soloed = source_track.soloed
+
+        try:
+            for source_clip in source_track.clips:
+                if not source_clip.filepath or not os.path.exists(
+                        source_clip.filepath):
+                    raise OSError(
+                        "Source audio is unavailable: {}".format(
+                            source_clip.filepath or source_clip.stem_name))
+                audio, source_sr = load_audio(source_clip.filepath)
+                audio = resample_audio(audio, source_sr, target_sr)
+                clip = Clip(
+                    source_clip.stem_name, source_clip.filepath, audio,
+                    target_sr, start_time=source_clip.start_time)
+                for attr in ("stretch", "semitones", "gain", "muted",
+                             "soloed", "color_hint", "fade_in_seconds",
+                             "fade_out_seconds"):
+                    setattr(clip, attr, getattr(source_clip, attr))
+                imported.add_clip(clip)
+        except (OSError, RuntimeError, ValueError) as e:
+            QMessageBox.warning(self, "Cannot import track", str(e))
+            return
+
+        base_name = imported.name
+        existing = {track.name for track in self.project.tracks}
+        suffix = 2
+        while imported.name in existing:
+            imported.name = "{}_{}".format(base_name, suffix)
+            suffix += 1
+
+        self._push_undo("Import track")
+        self._halt_playback()
+        if not self.project.tracks:
+            self.project.samplerate = target_sr
+        self.project.add_track(imported)
+        dsp = DSPChain(target_sr)
+        apply_dsp_params(
+            dsp, result.dsp_params.get(source_track.name, {}))
+        self.dsp_chains[imported.name] = dsp
+        self._rebuild_ui()
+        self.status.setText(
+            "Imported track '{}' from {}.".format(
+                imported.name, os.path.basename(path)))
 
     # --- Menu-driven actions -------------------------------------------------
 
@@ -302,6 +418,214 @@ class DAWWindow(QMainWindow):
     def open_batch(self):
         from ui.batch_dialog import BatchDialog
         BatchDialog(self).exec()
+
+    def _build_sectionbar(self):
+        bar = QFrame()
+        bar.setObjectName("songbar")
+        bar.setFixedHeight(40)
+        h = QHBoxLayout(bar)
+        h.setContentsMargins(16, 2, 16, 2)
+        h.setSpacing(6)
+
+        h.addWidget(QLabel("SECTION"))
+        self.section_combo = QComboBox()
+        self.section_combo.setMinimumWidth(210)
+        self.section_combo.currentIndexChanged.connect(
+            self._section_selection_changed)
+        h.addWidget(self.section_combo)
+
+        self.btn_section_jump = QPushButton("Go")
+        self.btn_section_jump.setToolTip("Jump to selected section")
+        self.btn_section_jump.clicked.connect(self.jump_to_section)
+        h.addWidget(self.btn_section_jump)
+        self.btn_section_loop = QPushButton("Loop Section")
+        self.btn_section_loop.clicked.connect(self.loop_selected_section)
+        h.addWidget(self.btn_section_loop)
+        self.btn_section_add = QPushButton("Add")
+        self.btn_section_add.setToolTip(
+            "Name the currently selected ruler range")
+        self.btn_section_add.clicked.connect(self.add_section)
+        h.addWidget(self.btn_section_add)
+        self.btn_section_update = QPushButton("Update")
+        self.btn_section_update.setToolTip(
+            "Set selected section to the current ruler range")
+        self.btn_section_update.clicked.connect(self.update_section)
+        h.addWidget(self.btn_section_update)
+        self.btn_section_delete = QPushButton("Delete")
+        self.btn_section_delete.clicked.connect(self.delete_section)
+        h.addWidget(self.btn_section_delete)
+
+        h.addStretch(1)
+        self.btn_count_in = QPushButton("Count-in")
+        self.btn_count_in.setCheckable(True)
+        self.btn_count_in.setToolTip(
+            "Play one bar of clicks before starting playback")
+        self.btn_count_in.toggled.connect(self._set_count_in)
+        h.addWidget(self.btn_count_in)
+        self.btn_setlist = QPushButton("Setlist…")
+        self.btn_setlist.clicked.connect(self.open_setlist)
+        h.addWidget(self.btn_setlist)
+        self.btn_setlist_prev = QPushButton("Prev Song")
+        self.btn_setlist_prev.clicked.connect(
+            lambda: self.navigate_setlist(-1))
+        h.addWidget(self.btn_setlist_prev)
+        self.btn_setlist_next = QPushButton("Next Song")
+        self.btn_setlist_next.clicked.connect(
+            lambda: self.navigate_setlist(1))
+        h.addWidget(self.btn_setlist_next)
+        self._refresh_section_controls()
+        self._refresh_setlist_controls()
+        return bar
+
+    def _current_section(self):
+        index = self.section_combo.currentIndex()
+        return (self.project.sections[index]
+                if 0 <= index < len(self.project.sections) else None)
+
+    def _section_selection_changed(self, _index):
+        if not hasattr(self, "btn_section_jump"):
+            return
+        has_section = self._current_section() is not None
+        self.btn_section_jump.setEnabled(has_section)
+        self.btn_section_loop.setEnabled(has_section)
+        self.btn_section_update.setEnabled(has_section)
+        self.btn_section_delete.setEnabled(has_section)
+
+    def _refresh_section_controls(self, selected=-1):
+        if not hasattr(self, "section_combo"):
+            return
+        combo = self.section_combo
+        combo.blockSignals(True)
+        combo.clear()
+        for section in self.project.sections:
+            combo.addItem(
+                "{}  [{:.2f}–{:.2f}]".format(
+                    section.name, section.start, section.end))
+        if selected >= 0:
+            combo.setCurrentIndex(min(selected, combo.count() - 1))
+        combo.blockSignals(False)
+        self._section_selection_changed(combo.currentIndex())
+        if hasattr(self, "loop_markers"):
+            self.loop_markers.set_sections(self.project.sections)
+
+    def _selected_section_range(self):
+        loop = self.project.loop
+        if loop.end <= loop.start + 0.05:
+            self.status.setText(
+                "Drag across the ruler to select a section range first.")
+            return None
+        return loop.start, loop.end
+
+    def add_section(self):
+        bounds = self._selected_section_range()
+        if bounds is None:
+            return
+        name, accepted = QInputDialog.getText(
+            self, "Add Section", "Section name:")
+        name = name.strip()
+        if not accepted or not name:
+            return
+        self._push_undo("Add section")
+        self.project.sections.append(
+            SectionMarker(name, bounds[0], bounds[1]))
+        self._refresh_section_controls(len(self.project.sections) - 1)
+        self.status.setText("Added section '{}'.".format(name))
+
+    def update_section(self):
+        section = self._current_section()
+        bounds = self._selected_section_range()
+        if section is None or bounds is None:
+            return
+        self._push_undo("Update section")
+        section.start, section.end = bounds
+        index = self.section_combo.currentIndex()
+        self._refresh_section_controls(index)
+        self.status.setText("Updated section '{}'.".format(section.name))
+
+    def delete_section(self):
+        index = self.section_combo.currentIndex()
+        section = self._current_section()
+        if section is None:
+            return
+        self._push_undo("Delete section")
+        del self.project.sections[index]
+        if (abs(self.project.loop.start - section.start) < 1e-6
+                and abs(self.project.loop.end - section.end) < 1e-6):
+            self.project.loop.enabled = False
+            self._sync_loop_ui()
+        self._refresh_section_controls(
+            min(index, len(self.project.sections) - 1))
+        self.status.setText("Deleted section '{}'.".format(section.name))
+
+    def jump_to_section(self):
+        section = self._current_section()
+        if section is not None:
+            self.on_seek(section.start)
+
+    def loop_selected_section(self):
+        section = self._current_section()
+        if section is None:
+            return
+        self.project.loop.start = section.start
+        self.project.loop.end = section.end
+        self.project.loop.enabled = True
+        self._sync_loop_ui()
+        self.status.setText("Looping section '{}'.".format(section.name))
+
+    def _set_count_in(self, enabled):
+        self.project.count_in_bars = 1 if enabled else 0
+
+    def open_setlist(self):
+        from ui.setlist_dialog import SetlistDialog
+        dialog = SetlistDialog(self)
+        if (dialog.exec() == QDialog.DialogCode.Accepted
+                and dialog.selected_path):
+            self._load_setlist_project(dialog.selected_path)
+        self._refresh_setlist_controls()
+
+    def navigate_setlist(self, direction):
+        from ui.setlist_dialog import setlist_paths
+        paths = [path for path in setlist_paths()
+                 if os.path.isfile(path)]
+        if not paths:
+            self.status.setText(
+                "Add projects in Setlist before navigating songs.")
+            self._refresh_setlist_controls()
+            return
+        current = (os.path.abspath(self.project_path)
+                   if self.project_path else None)
+        if current in paths:
+            index = (paths.index(current) + direction) % len(paths)
+        else:
+            index = 0 if direction >= 0 else len(paths) - 1
+        self._load_setlist_project(paths[index])
+
+    def _load_setlist_project(self, path):
+        from core.project_io import ProjectLoadError, load_project
+        try:
+            result = load_project(path)
+        except (ProjectLoadError, OSError, ValueError) as e:
+            QMessageBox.warning(self, "Cannot open setlist project", str(e))
+            return
+        self.history.clear()
+        self.project_path = path
+        self._install_loaded_project(result)
+        if result.missing:
+            QMessageBox.warning(
+                self, "Missing audio",
+                "{} audio file(s) in this project could not be loaded."
+                .format(len(result.missing)))
+        self._refresh_setlist_controls()
+
+    def _refresh_setlist_controls(self):
+        if not hasattr(self, "btn_setlist_prev"):
+            return
+        from ui.setlist_dialog import setlist_paths
+        available = [path for path in setlist_paths()
+                     if os.path.isfile(path)]
+        enabled = len(available) > 1
+        self.btn_setlist_prev.setEnabled(enabled)
+        self.btn_setlist_next.setEnabled(enabled)
 
     def undo(self):
         if not getattr(self, "history", None) or not self.history.can_undo():
@@ -370,6 +694,12 @@ class DAWWindow(QMainWindow):
         self.btn_stop.clicked.connect(self.stop_playback)
         for b in (self.btn_rewind, self.btn_play, self.btn_stop):
             h.addWidget(b)
+        self.btn_loop = QPushButton("Loop")
+        self.btn_loop.setCheckable(True)
+        self.btn_loop.setToolTip(
+            "Drag across the ruler to select a section; toggle to repeat it")
+        self.btn_loop.toggled.connect(self._toggle_loop_enabled)
+        h.addWidget(self.btn_loop)
         h.addSpacing(10)
         box = QFrame()
         box.setObjectName("timeBox")
@@ -399,15 +729,6 @@ class DAWWindow(QMainWindow):
         h.addWidget(self.btn_batch)
         return bar
 
-    def toggle_playback(self):
-        if not self.engine:
-            return
-        for t in self.project.tracks:
-            print("[play]", t.name, "muted:", t.muted,
-                  "soloed:", t.soloed, "vol:", t.volume,
-                  "clips:", len(t.clips),
-                  "first_clip_len:", len(t.clips[0].data) if t.clips else 0)
-        ...
     def _build_songbar(self):
         bar = QFrame()
         bar.setObjectName("songbar")
@@ -522,6 +843,17 @@ class DAWWindow(QMainWindow):
         self.scene = TimelineScene(num_tracks=6)
         self.view = TimelineView(self.scene)
         self.ruler = TimeRuler(self.view)
+        self.loop_markers = LoopMarkers(self.view, self.ruler)
+        self.loop_markers.changed.connect(self._on_loop_changed)
+        self.loop_markers.seek_requested.connect(self.on_seek)
+        ruler_layer = QWidget()
+        ruler_stack = QStackedLayout(ruler_layer)
+        ruler_stack.setContentsMargins(0, 0, 0, 0)
+        ruler_stack.setStackingMode(
+            QStackedLayout.StackingMode.StackAll)
+        ruler_stack.addWidget(self.ruler)
+        ruler_stack.addWidget(self.loop_markers)
+        ruler_stack.setCurrentWidget(self.loop_markers)
         self.chord_strip = ChordStrip(self.view)
         self.chord_strip.seek_requested.connect(self.on_seek)
         self.chords = []
@@ -579,7 +911,7 @@ class DAWWindow(QMainWindow):
         self.chord_label.setVisible(False)
         self.chord_strip.setVisible(False)
         g.addWidget(corner, 0, 0)
-        g.addWidget(self.ruler, 0, 1)
+        g.addWidget(ruler_layer, 0, 1)
         g.addWidget(self.chord_label, 1, 0)
         g.addWidget(self.chord_strip, 1, 1)
         g.addWidget(self.header_col, 2, 0)
@@ -848,6 +1180,7 @@ class DAWWindow(QMainWindow):
             header.set_soloed(track.soloed)
             header.mute_toggled.connect(self.set_track_mute)
             header.solo_toggled.connect(self.set_track_solo)
+            header.reorder_requested.connect(self.reorder_track)
             self.header_col.add(header)
             self.track_headers[track.name] = header
         self.mixer.set_tracks(
@@ -855,11 +1188,17 @@ class DAWWindow(QMainWindow):
             self.project.master_volume)
         self.engine = TimelineEngine(
             self.project, lambda name: self.dsp_chains[name])
+        self._sync_loop_ui()
+        self._refresh_section_controls()
+        self.btn_count_in.blockSignals(True)
+        self.btn_count_in.setChecked(self.project.count_in_bars > 0)
+        self.btn_count_in.blockSignals(False)
         self.lbl_total.setText(
             "/ " + fmt_clock(self.project.total_duration))
         self._refresh_song_controls()
         self._show_playhead(0.0)
         self._refresh_tool_buttons()
+        self._refresh_setlist_controls()
         self.scene.selectionChanged.connect(
             self.on_selection_changed)
         self.on_selection_changed()
@@ -871,6 +1210,7 @@ class DAWWindow(QMainWindow):
             bool(names & {"other", "guitar", "piano", "vocals"}))
         has = bool(names)
         self.btn_export.setEnabled(has)
+        self.btn_loop.setEnabled(has)
         for b in (self.btn_play, self.btn_stop, self.btn_rewind):
             b.setEnabled(has)
 
@@ -909,6 +1249,25 @@ class DAWWindow(QMainWindow):
         t = self._track(name)
         if t:
             t.pan = pan
+
+    def reorder_track(self, name, insertion_index):
+        source_index = next(
+            (i for i, track in enumerate(self.project.tracks)
+             if track.name == name), None)
+        if source_index is None:
+            return
+        insertion_index = max(
+            0, min(int(insertion_index), len(self.project.tracks)))
+        destination = insertion_index
+        if source_index < insertion_index:
+            destination -= 1
+        if destination == source_index:
+            return
+        self._push_undo("Reorder tracks")
+        track = self.project.tracks.pop(source_index)
+        self.project.tracks.insert(destination, track)
+        self._rebuild_ui()
+        self.status.setText("Moved '{}'.".format(track.name))
 
     def set_master_volume(self, gain):
         self.project.master_volume = gain
@@ -1247,7 +1606,8 @@ class DAWWindow(QMainWindow):
         if not self.engine:
             return
         t = max(0.0, min(t, self.project.total_duration))
-        self.engine.seek(t)
+        self.engine.seek(self.project.loop.wrap(t))
+        t = self.engine.playhead_seconds
         self._show_playhead(t)
 
     def rewind(self):
@@ -1282,7 +1642,11 @@ class DAWWindow(QMainWindow):
             return
         if self.engine.playhead_seconds >= self.project.total_duration - 0.05:
             self.engine.seek(0.0)
-        self.engine.start(from_seconds=self.engine.playhead_seconds)
+        self.engine.start(
+            from_seconds=self.engine.playhead_seconds,
+            count_in_bars=self.project.count_in_bars)
+        if self.project.count_in_bars:
+            self.status.setText("Count-in…")
         self.playback_timer.start()
         self.btn_play.setIcon(make_icon("pause"))
 
@@ -1474,22 +1838,45 @@ class DAWWindow(QMainWindow):
                 len(chords), ", ".join(names[:8]) + (" ..." if len(names) > 8 else "")))
 
     def _on_loop_changed(self, start, end):
+        duration = self.project.total_duration
+        start = max(0.0, min(start, duration))
+        end = max(0.0, min(end, duration))
+        if end <= start + 0.05:
+            self.loop_markers.set_loop(
+                self.project.loop.start, self.project.loop.end,
+                self.project.loop.enabled)
+            self.status.setText("Select a section within the loaded audio.")
+            return
         self.project.loop.start = start
         self.project.loop.end = end
         self.project.loop.enabled = True
         self.loop_markers.set_loop(start, end, True)
+        self._sync_loop_button(True)
         self.status.setText(
-            "Loop: {:.2f}s - {:.2f}s".format(start, end))
+            "Selected section: {:.2f}s - {:.2f}s".format(start, end))
 
-    def _toggle_loop_enabled(self):
-        self.project.loop.enabled = not self.project.loop.enabled
+    def _sync_loop_button(self, enabled):
+        self.btn_loop.blockSignals(True)
+        self.btn_loop.setChecked(enabled)
+        self.btn_loop.blockSignals(False)
+
+    def _sync_loop_ui(self):
+        loop = self.project.loop
         self.loop_markers.set_loop(
-            self.project.loop.start,
-            self.project.loop.end,
-            self.project.loop.enabled)
+            loop.start, loop.end, loop.enabled)
+        self.loop_markers.set_sections(self.project.sections)
+        self._sync_loop_button(loop.enabled)
+
+    def _toggle_loop_enabled(self, enabled):
+        loop = self.project.loop
+        if enabled and loop.end <= loop.start + 0.05:
+            self._sync_loop_button(False)
+            self.status.setText("Drag across the ruler to select a section.")
+            return
+        loop.enabled = bool(enabled)
+        self.loop_markers.set_loop(loop.start, loop.end, loop.enabled)
         self.status.setText(
-            "Loop {}".format("enabled" if self.project.loop.enabled
-                              else "disabled"))
+            "Loop {}".format("enabled" if loop.enabled else "disabled"))
 
 
     def _install_nudge_shortcuts(self):
@@ -1514,18 +1901,13 @@ class DAWWindow(QMainWindow):
             if not self._has_beats():
                 self.status.setText("No beat grid to quantize against.")
                 return
-            from core.nudge import quantize_by_fraction
-            from core.beats import bpm_from_beats
+            from core.nudge import quantize_time
             self._push_undo("Quantize clip")
             clip, item = self.selected_clip
-            bpm = None
-            try:
-                bpm = bpm_from_beats(self.project.beat_times)
-            except Exception:
-                pass
-            eff = (bpm * self.project.tempo) if bpm else None
-            clip.start_time = quantize_by_fraction(
-                clip.start_time, eff, fraction=1.0, mode=mode)
+            beats = (np.asarray(self.project.beat_times, dtype=float)
+                     / max(self.project.tempo, 1e-3))
+            clip.start_time = quantize_time(
+                clip.start_time, beats, mode=mode)
             item.setX(time_to_x(clip.start_time))
             self._project_changed()
             self.status.setText(
@@ -1672,6 +2054,13 @@ class DAWWindow(QMainWindow):
             if track.name not in self.dsp_chains:
                 self.dsp_chains[track.name] = DSPChain(project.samplerate)
         self._rebuild_ui()
+        # Recovery: clear any stale render from a previous session
+        for _t in self.project.tracks:
+            for _c in _t.clips:
+                if _c.needs_render() and not _c.is_ready():
+                    _c.render = None
+                    _c.render_key = None
+
         if any(c.needs_render() for t in project.tracks for c in t.clips):
             self._request_render()
 

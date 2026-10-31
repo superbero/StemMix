@@ -21,3 +21,20 @@ macOS: brew install portaudio ffmpeg
 
     python apps/mixer_app.py
     python apps/daw.py
+
+## Timeline editing
+
+- Drag across the time ruler to select a section. Use **Loop** to enable or
+  disable repeat playback for that range; drag either marker to adjust it.
+  The section bar can name ranges, jump to them, or loop a saved section.
+  Loop boundaries use a short crossfade to reduce clicks.
+- Enable **Count-in** for a one-bar metronome lead-in before playback.
+- Select a clip and press `[` / `]` to nudge it by 10 ms, `{` / `}` for 100 ms,
+  or `Shift+[` / `Shift+]` for one second. `N`, `Shift+N`, and `Alt+N` snap to
+  the nearest, previous, or next detected beat.
+- Choose **File → Import Track from Project…** to select a track from another
+  `.stemmix` project and add it to the current arrangement.
+- Drag a track name vertically to reorder its timeline lane and mixer strip.
+  Track order is saved with the project and restored by undo/redo.
+- Use **File → Setlist Manager…** to organize projects, then navigate songs
+  with **Prev Song** / **Next Song** or `Ctrl+Alt+Left` / `Ctrl+Alt+Right`.

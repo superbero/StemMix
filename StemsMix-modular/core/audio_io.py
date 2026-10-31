@@ -1,6 +1,7 @@
 """Audio I/O helpers."""
 import os
 import subprocess
+import math
 
 import numpy as np
 import soundfile as sf
@@ -44,6 +45,21 @@ def load_audio(path):
     if data.ndim == 1:
         data = np.column_stack((data, data))
     return data, sr
+
+
+def resample_audio(data, source_rate, target_rate):
+    """Convert audio to a target sample rate without changing its duration."""
+    source_rate = int(source_rate)
+    target_rate = int(target_rate)
+    if source_rate <= 0 or target_rate <= 0:
+        raise ValueError("Sample rates must be positive.")
+    if source_rate == target_rate:
+        return data
+    divisor = math.gcd(source_rate, target_rate)
+    from scipy.signal import resample_poly
+    return resample_poly(
+        data, target_rate // divisor, source_rate // divisor,
+        axis=0).astype(np.float32, copy=False)
 
 
 def save_wav(path, data, samplerate, subtype='PCM_24'):

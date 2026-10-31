@@ -15,6 +15,7 @@ def build_menubar(window):
         save_project(save_as: bool)
         open_project()
         import_stems()
+        import_track_from_project()
         export_mix()
         export_stems()
         open_batch()
@@ -43,6 +44,14 @@ def build_menubar(window):
     act_import.setShortcut(QKeySequence("Ctrl+Shift+I"))
     act_import.triggered.connect(window.import_stems)
     file_menu.addAction(act_import)
+
+    act_import_track = QAction("Import Track from Project…", window)
+    act_import_track.triggered.connect(window.import_track_from_project)
+    file_menu.addAction(act_import_track)
+
+    act_setlist = QAction("Setlist Manager…", window)
+    act_setlist.triggered.connect(window.open_setlist)
+    file_menu.addAction(act_setlist)
 
     file_menu.addSeparator()
 
@@ -110,6 +119,33 @@ def build_menubar(window):
     act_rewind.setShortcut(QKeySequence("Home"))
     act_rewind.triggered.connect(window.rewind)
     transport_menu.addAction(act_rewind)
+
+    act_previous_song = QAction("Previous Song", window)
+    act_previous_song.setShortcut(QKeySequence("Ctrl+Alt+Left"))
+    act_previous_song.triggered.connect(
+        lambda: window.navigate_setlist(-1))
+    transport_menu.addAction(act_previous_song)
+
+    act_next_song = QAction("Next Song", window)
+    act_next_song.setShortcut(QKeySequence("Ctrl+Alt+Right"))
+    act_next_song.triggered.connect(
+        lambda: window.navigate_setlist(1))
+    transport_menu.addAction(act_next_song)
+
+    section_menu = bar.addMenu("&Sections")
+    act_add_section = QAction("Add Section from Loop Range…", window)
+    act_add_section.triggered.connect(window.add_section)
+    section_menu.addAction(act_add_section)
+
+    act_jump_section = QAction("Jump to Selected Section", window)
+    act_jump_section.setShortcut(QKeySequence("Ctrl+Alt+J"))
+    act_jump_section.triggered.connect(window.jump_to_section)
+    section_menu.addAction(act_jump_section)
+
+    act_loop_section = QAction("Loop Selected Section", window)
+    act_loop_section.setShortcut(QKeySequence("Ctrl+Alt+L"))
+    act_loop_section.triggered.connect(window.loop_selected_section)
+    section_menu.addAction(act_loop_section)
 
     window._menubar = bar
     return bar

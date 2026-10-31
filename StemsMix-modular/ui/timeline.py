@@ -2,14 +2,15 @@
 import math
 
 import numpy as np
-from PyQt6.QtCore import QPoint, QPointF, QRectF, Qt, pyqtSignal
+from PyQt6.QtCore import QEvent, QPoint, QPointF, QRectF, Qt, pyqtSignal
 from PyQt6.QtGui import (QBrush, QColor, QFont, QPainter, QPainterPath,
-                         QPen, QPolygonF, QTransform)
+                         QDrag, QPen, QPolygonF, QTransform)
 from PyQt6.QtWidgets import (QFrame, QGraphicsItem, QGraphicsPathItem,
                              QGraphicsScene, QGraphicsSimpleTextItem,
                              QGraphicsRectItem, QGraphicsView, QHBoxLayout,
-                             QLabel, QPushButton, QScrollArea, QVBoxLayout,
-                             QWidget)
+                             QApplication, QLabel, QPushButton, QScrollArea,
+                             QVBoxLayout, QWidget)
+from PyQt6.QtCore import QMimeData
 
 from .style import COLORS, SCROLLBAR
 from core.chords import transpose_chord
@@ -563,6 +564,7 @@ class ChordStrip(QWidget):
 class TrackHeader(QFrame):
     mute_toggled = pyqtSignal(str, bool)
     solo_toggled = pyqtSignal(str, bool)
+    reorder_requested = pyqtSignal(str, int)
 
     def __init__(self, stem_name, color_hex, parent=None):
         super().__init__(parent)
@@ -582,6 +584,8 @@ class TrackHeader(QFrame):
         body.setSpacing(8)
         name = QLabel(stem_name.capitalize())
         name.setObjectName("trackName")
+        name.setToolTip("Drag this track header to rearrange tracks")
+        name.setCursor(Qt.CursorShape.OpenHandCursor)
         body.addWidget(name)
         row = QHBoxLayout()
         row.setSpacing(4)
@@ -597,6 +601,53 @@ class TrackHeader(QFrame):
         body.addLayout(row)
         body.addStretch()
         root.addLayout(body, 1)
+        self._drag_start = None
+        self.setAcceptDrops(True)
+        name.setAcceptDrops(True)
+        name.installEventFilter(self)
+        self.installEventFilter(self)
+
+    def eventFilter(self, watched, event):
+        if watched not in (self, self.findChild(QLabel, "trackName")):
+            return super().eventFilter(watched, event)
+        if event.type() == QEvent.Type.MouseButtonPress:
+            if event.button() == Qt.MouseButton.LeftButton:
+                self._drag_start = event.globalPosition().toPoint()
+        elif event.type() == QEvent.Type.MouseMove:
+            if (self._drag_start is not None
+                    and event.buttons() & Qt.MouseButton.LeftButton
+                    and (event.globalPosition().toPoint()
+                         - self._drag_start).manhattanLength()
+                    >= QApplication.startDragDistance()):
+                self._start_track_drag()
+                self._drag_start = None
+                return True
+        elif event.type() == QEvent.Type.MouseButtonRelease:
+            self._drag_start = None
+        elif event.type() == QEvent.Type.DragEnter:
+            if event.mimeData().hasText():
+                event.acceptProposedAction()
+                return True
+        elif event.type() == QEvent.Type.Drop:
+            if event.mimeData().hasText():
+                track_name = event.mimeData().text()
+                pos = event.position().toPoint()
+                if watched is not self:
+                    pos = watched.mapTo(self, pos)
+                index = TrackHeaderColumn.header_index(self)
+                if pos.y() >= self.height() / 2:
+                    index += 1
+                self.reorder_requested.emit(track_name, index)
+                event.acceptProposedAction()
+                return True
+        return super().eventFilter(watched, event)
+
+    def _start_track_drag(self):
+        mime = QMimeData()
+        mime.setText(self.stem_name)
+        drag = QDrag(self)
+        drag.setMimeData(mime)
+        drag.exec(Qt.DropAction.MoveAction)
 
     @staticmethod
     def _ms(text, kind):
@@ -653,6 +704,16 @@ class TrackHeaderColumn(QScrollArea):
 
     def add(self, header):
         self._lay.insertWidget(self._lay.count() - 1, header)
+
+    @staticmethod
+    def header_index(header):
+        parent = header.parentWidget()
+        if not isinstance(parent, QWidget):
+            return 0
+        for index in range(parent.layout().count()):
+            if parent.layout().itemAt(index).widget() is header:
+                return index
+        return 0
 
     def wheelEvent(self, e):
         bar = self.verticalScrollBar()

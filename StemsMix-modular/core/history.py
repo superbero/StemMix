@@ -88,6 +88,8 @@ def _snapshot(project):
         "beats_per_bar": int(project.beats_per_bar),
         "downbeat_phase": int(project.downbeat_phase),
         "loop": project.loop.to_dict(),
+        "sections": [section.to_dict() for section in project.sections],
+        "count_in_bars": int(project.count_in_bars),
         "tracks": [
             {
                 "name": t.name,
@@ -148,6 +150,13 @@ def _restore(snap, current_project):
     p.downbeat_phase = int(snap["downbeat_phase"])
     from .loop import LoopRegion
     p.loop = LoopRegion.from_dict(snap.get("loop"))
+    from .timeline_model import SectionMarker
+    p.sections = [
+        SectionMarker(str(section["name"]), float(section["start"]),
+                      float(section["end"]))
+        for section in snap.get("sections", [])
+    ]
+    p.count_in_bars = int(snap.get("count_in_bars", 0))
 
     for tdata in snap["tracks"]:
         track = Track(tdata["name"])

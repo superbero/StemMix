@@ -20,13 +20,31 @@ class TimelineEngine:
         self._click = self._make_click(1000.0, 0.5)
         self._click_accent = self._make_click(1650.0, 0.8)
         self._beat_cache = None
+        self._count_in_frames = 0
+        self._count_in_total = 0
+        self._count_in_beat_frames = 0
 
     # ------------------------------------------------------------ transport
-    def start(self, from_seconds=None):
+    def start(self, from_seconds=None, count_in_bars=0):
         if self.stream is not None:
             self.stop()
         if from_seconds is not None:
             self.seek(from_seconds)
+        self._count_in_frames = 0
+        self._count_in_total = 0
+        self._count_in_beat_frames = 0
+        if count_in_bars > 0:
+            p = self.project
+            base_bpm = p.bpm
+            if p.beat_times is not None and len(p.beat_times) > 1:
+                from .beats import bpm_from_beats
+                base_bpm = bpm_from_beats(p.beat_times) or base_bpm
+            bpm = ((base_bpm * p.tempo) if base_bpm else 120.0)
+            self._count_in_beat_frames = max(
+                1, int(round(60.0 / max(bpm, 1.0) * self.samplerate)))
+            beats = max(1, int(p.beats_per_bar)) * int(count_in_bars)
+            self._count_in_total = self._count_in_beat_frames * beats
+            self._count_in_frames = self._count_in_total
         self.stream = sd.OutputStream(
             samplerate=self.samplerate, channels=2,
             callback=self._callback, blocksize=512)
@@ -45,6 +63,7 @@ class TimelineEngine:
     def seek(self, seconds):
         self.playhead_seconds = max(0.0, float(seconds))
         self._playhead_frames = int(self.playhead_seconds * self.samplerate)
+        self._count_in_frames = 0
 
     # ------------------------------------------------------------- metronome
     def _make_click(self, freq, gain):
@@ -88,6 +107,26 @@ class TimelineEngine:
                    if (k - p.downbeat_phase) % meter == 0 else self._click)
             out[a - start_frame:b - start_frame, :] += (
                 buf[a - bf:b - bf] * p.click_volume)[:, None]
+
+    def _mix_count_in(self, out, offset, n_frames, elapsed_frames):
+        beat_frames = self._count_in_beat_frames
+        if beat_frames <= 0 or n_frames <= 0:
+            return
+        first = elapsed_frames // beat_frames
+        last = (elapsed_frames + n_frames - 1) // beat_frames
+        for beat in range(first, last + 1):
+            beat_start = beat * beat_frames
+            start = max(elapsed_frames, beat_start)
+            end = min(elapsed_frames + n_frames,
+                      beat_start + len(self._click))
+            if end <= start:
+                continue
+            click = self._click_accent if beat == 0 else self._click
+            amount = getattr(self.project, "click_volume", 0.6)
+            out[offset + start - elapsed_frames:
+                offset + end - elapsed_frames] += (
+                    click[start - beat_start:end - beat_start] * amount
+                )[:, None]
 
     # ------------------------------------------------------------- mixing
     @staticmethod
@@ -255,9 +294,82 @@ class TimelineEngine:
         # flag (the old code returned early and played garbage).
         outdata.fill(0)
         sr = self.samplerate
-        out, levels = self._mix_block(self._playhead_frames, frames)
+        out = np.zeros((frames, 2), dtype="float32")
+        levels = {}
+        pre_roll = min(frames, self._count_in_frames)
+        if pre_roll:
+            elapsed = self._count_in_total - self._count_in_frames
+            self._mix_count_in(out, 0, pre_roll, elapsed)
+            self._count_in_frames -= pre_roll
+        audio_frames = frames - pre_roll
+        if audio_frames <= 0:
+            outdata[:] = np.clip(out, -1.0, 1.0)
+            self.levels = {}
+            self.master_level = tuple(
+                float(value) for value in np.abs(out).max(axis=0))
+            return
 
-        self._playhead_frames += frames
+        audio_out = out[pre_roll:]
+        loop = self.project.loop
+        loop_active = loop.is_active()
+        loop_start = int(round(loop.start * sr))
+        loop_end = int(round(loop.end * sr))
+        loop_xfade = (min(int(0.01 * sr),
+                          max(0, (loop_end - loop_start) // 2))
+                      if loop_active else 0)
+        written = 0
+
+        while written < audio_frames:
+            position = self._playhead_frames
+            if loop_active and position >= loop_end:
+                self.seek(loop.start + loop_xfade / sr)
+                position = self._playhead_frames
+
+            boundary = None
+            if loop_active:
+                boundary = (loop_start if position < loop_start
+                            else loop_end)
+            count = audio_frames - written
+            if boundary is not None:
+                count = min(count, boundary - position)
+            if count <= 0:
+                self.seek(loop.start)
+                continue
+
+            block, block_levels = self._mix_block(position, count)
+            if loop_xfade:
+                fade_start = loop_end - loop_xfade
+                overlap_start = max(position, fade_start)
+                overlap_end = min(position + count, loop_end)
+                if overlap_end > overlap_start:
+                    cross_frames = overlap_end - overlap_start
+                    head_start = (loop_start + overlap_start - fade_start)
+                    head, head_levels = self._mix_block(
+                        head_start, cross_frames)
+                    phase = np.linspace(
+                        0.0, np.pi / 2.0, cross_frames,
+                        endpoint=True, dtype="float32")
+                    tail_gain = np.cos(phase)[:, None]
+                    head_gain = np.sin(phase)[:, None]
+                    a = overlap_start - position
+                    b = overlap_end - position
+                    block[a:b] = (block[a:b] * tail_gain
+                                  + head * head_gain)
+                    for name, peak in head_levels.items():
+                        previous = block_levels.get(name, (0.0, 0.0))
+                        block_levels[name] = (
+                            max(previous[0], peak[0]),
+                            max(previous[1], peak[1]))
+            audio_out[written:written + count] = block
+            for name, peak in block_levels.items():
+                previous = levels.get(name, (0.0, 0.0))
+                levels[name] = (max(previous[0], peak[0]),
+                                max(previous[1], peak[1]))
+            written += count
+            self._playhead_frames += count
+            if loop_active and self._playhead_frames >= loop_end:
+                self.seek(loop.start + loop_xfade / sr)
+
         self.playhead_seconds = self._playhead_frames / sr
         out = np.clip(out, -1.0, 1.0)
         outdata[:] = out
@@ -265,14 +377,9 @@ class TimelineEngine:
         mp = np.abs(out).max(axis=0)
         self.master_level = (float(mp[0]), float(mp[1]))
 
-        # Loop wrap takes priority over end-of-project
-        if self.project.loop.is_active():
-            if self.playhead_seconds >= self.project.loop.end:
-                self.seek(self.project.loop.start)
-                return
-
         total = self.project.total_duration
-        if total > 0 and self.playhead_seconds >= total:
+        if (self._count_in_frames == 0 and total > 0
+                and self.playhead_seconds >= total):
             self.is_playing = False
             raise sd.CallbackStop
 

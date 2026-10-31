@@ -1,7 +1,18 @@
 """Timeline project state: tracks, clips, playhead. No audio, no Qt."""
 import copy
+from dataclasses import dataclass
 
 from .loop import LoopRegion
+
+
+@dataclass
+class SectionMarker:
+    name: str
+    start: float
+    end: float
+
+    def to_dict(self):
+        return {"name": self.name, "start": self.start, "end": self.end}
 
 
 class Clip:
@@ -98,6 +109,8 @@ class Project:
         self.tracks = []
         self.samplerate = 44100
         self.loop = LoopRegion()
+        self.sections = []
+        self.count_in_bars = 0
         self.total_duration = 0.0
         self.master_volume = 1.0
         self.tempo = 1.0   # cumulative tempo ratio vs. the original
