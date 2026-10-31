@@ -1,6 +1,6 @@
 """Batch separation: queue many audio files, run them one after another.
 
-The worker calls core.separation.separate_file for each item. Uses the
+The worker calls core.separation.separate_task for each item. Uses the
 same model selection dialog as single-file separation so the user picks
 model / provider / chunked once for the whole batch.
 """
@@ -25,27 +25,30 @@ class _BatchWorker(QThread):
     item_failed = pyqtSignal(int, str)
     all_done = pyqtSignal()
 
-    def __init__(self, jobs, model, providers, chunked):
+    def __init__(self, jobs, model, providers, chunked, task="full"):
         super().__init__()
         self.jobs = jobs
         self.model = model
         self.providers = providers
         self.chunked = chunked
+        self.task = task
         self._cancel = False
 
     def cancel(self):
         self._cancel = True
 
     def run(self):
-        from core.separation import separate_file
+        from core.separation import separate_task
         for i, (src, out_dir) in enumerate(self.jobs):
             if self._cancel:
                 self.item_failed.emit(i, "Cancelled")
                 continue
             self.item_started.emit(i, os.path.basename(src))
             try:
-                separate_file(
-                    src, out_dir, self.model,
+                task_dir = (out_dir if self.task == "full"
+                            else os.path.join(out_dir, self.task))
+                separate_task(
+                    src, task_dir, self.model, task=self.task,
                     providers=self.providers,
                     chunked=self.chunked,
                     progress_cb=lambda p, m, idx=i:
@@ -190,6 +193,7 @@ class BatchDialog(QDialog):
         if dlg.exec() != QDialog.DialogCode.Accepted:
             return
         model = dlg.selected_model()
+        task = dlg.selected_task()
         providers = ["cpu"] if dlg.force_cpu() else "auto"
         chunked = dlg.use_chunked()
 
@@ -205,7 +209,8 @@ class BatchDialog(QDialog):
         self.status.setText("Running batch...")
 
         jobs = [(p, o) for p, o, _ in self.jobs]
-        self.worker = _BatchWorker(jobs, model, providers, chunked)
+        self.worker = _BatchWorker(
+            jobs, model, providers, chunked, task=task)
         self.worker.item_started.connect(self._on_started)
         self.worker.item_progress.connect(self._on_progress)
         self.worker.item_done.connect(self._on_done)

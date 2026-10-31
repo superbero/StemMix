@@ -105,6 +105,120 @@ def separate_file(input_path, output_dir, model_name,
                 pass
 
 
+def separate_task(input_path, output_dir, model_name, task="full",
+                  providers="auto", precision="fp32", chunked=False,
+                  progress_cb=None):
+    """Run a supported separation workflow and return its output stems."""
+    if task not in ("full", "vocal_accompaniment", "drum_parts"):
+        raise ValueError("Unknown separation task: {}".format(task))
+    if task == "full":
+        stems = separate_file(
+            input_path, output_dir, model_name, providers=providers,
+            precision=precision, chunked=chunked,
+            progress_cb=progress_cb)
+        if not stems:
+            raise RuntimeError("The separator returned no usable stems.")
+        return stems
+
+    os.makedirs(output_dir, exist_ok=True)
+    temp_dir = tempfile.mkdtemp(
+        prefix="stemsmix_task_", dir=os.path.dirname(output_dir) or None)
+    try:
+        stems = separate_file(
+            input_path, temp_dir, model_name, providers=providers,
+            precision=precision, chunked=chunked,
+            progress_cb=progress_cb)
+        if not stems:
+            raise RuntimeError("The separator returned no usable stems.")
+        if task == "vocal_accompaniment":
+            return _write_vocal_accompaniment(stems, output_dir)
+        return _write_drum_parts(
+            stems, output_dir, providers, progress_cb)
+    finally:
+        shutil.rmtree(temp_dir, ignore_errors=True)
+
+
+def _write_vocal_accompaniment(stems, output_dir):
+    """Create a vocal stem and a backing made from the other model stems."""
+    vocal_path = next(
+        (path for name, path in stems.items()
+         if name.lower() == "vocals"), None)
+    backing_paths = [
+        path for name, path in stems.items() if name.lower() != "vocals"]
+    if vocal_path is None or not backing_paths:
+        raise RuntimeError(
+            "The selected model did not return vocals and accompaniment "
+            "stems.")
+
+    vocal, vocal_sr = sf.read(
+        vocal_path, dtype="float32", always_2d=True)
+    backing = None
+    for path in backing_paths:
+        audio, sr = sf.read(path, dtype="float32", always_2d=True)
+        if sr != vocal_sr:
+            raise RuntimeError("Model stems have mismatched sample rates.")
+        if audio.shape[1] != vocal.shape[1]:
+            raise RuntimeError("Model stems have mismatched channel counts.")
+        length = min(len(audio), len(vocal))
+        if backing is None:
+            backing = np.zeros_like(vocal[:length])
+        length = min(length, len(backing))
+        backing[:length] += audio[:length]
+        if len(backing) > length:
+            backing = backing[:length]
+        if len(vocal) > length:
+            vocal = vocal[:length]
+
+    os.makedirs(output_dir, exist_ok=True)
+    vocal_out = os.path.join(output_dir, "vocals.wav")
+    backing_out = os.path.join(output_dir, "accompaniment.wav")
+    sf.write(vocal_out, vocal, vocal_sr, subtype="FLOAT")
+    sf.write(backing_out, backing, vocal_sr, subtype="FLOAT")
+    return {"vocals": vocal_out, "accompaniment": backing_out}
+
+
+def _write_drum_parts(stems, output_dir, providers, progress_cb):
+    drum_path = next(
+        (path for name, path in stems.items()
+         if name.lower() == "drums"), None)
+    if drum_path is None:
+        raise RuntimeError("The selected model did not return a drums stem.")
+    try:
+        from .drumsep import get_engine, preferred_device, inference_tuning
+        from mdxnet_infer import MDX23CInference  # noqa: F401
+    except ImportError as e:
+        raise RuntimeError(
+            "Drum-part separation requires mdxnet-infer. Install it with "
+            "`pip install mdxnet-infer`.") from e
+
+    device = ("cpu" if providers in ("cpu", ["cpu"])
+              else preferred_device())
+    if progress_cb:
+        progress_cb(15, "Loading drum-part model on {}...".format(device))
+    audio, sr = sf.read(drum_path, dtype="float32", always_2d=True)
+    if audio.shape[1] == 1:
+        audio = np.repeat(audio, 2, axis=1)
+    elif audio.shape[1] > 2:
+        audio = audio[:, :2]
+    engine = get_engine(device=device, progress_cb=progress_cb)
+    tuning = inference_tuning(device)
+    if progress_cb:
+        progress_cb(35, "Separating kick, snare, toms and cymbals...")
+    parts = engine.separate(
+        audio, sample_rate=sr, progress=False, **tuning)
+    if not parts:
+        raise RuntimeError("Drum-part model returned no stems.")
+
+    os.makedirs(output_dir, exist_ok=True)
+    output = {}
+    sample_rate = engine.config.audio.sample_rate
+    for name, data in parts.items():
+        path = os.path.join(output_dir, "{}.wav".format(name))
+        sf.write(path, np.asarray(data), sample_rate)
+        output[str(name)] = path
+    return output
+
+
 def _onnx_providers(providers):
     """ONNX Runtime must not auto-pick CoreML (it cannot compile the
     Demucs graph), so "auto" means the CPU provider here."""

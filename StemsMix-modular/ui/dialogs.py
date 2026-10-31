@@ -331,14 +331,38 @@ class ModelSelectionDialog(QDialog):
         layout.setContentsMargins(20, 20, 20, 20)
         layout.setSpacing(14)
 
-        title = QLabel("Separation Model")
+        title = QLabel("Choose Separation Task")
         title.setObjectName("header_title")
         layout.addWidget(title)
 
+        self.task_combo = QComboBox()
+        self.task_combo.addItem(
+            "Full instrument stems (4 or 6)", "full")
+        self.task_combo.addItem(
+            "Vocals + accompaniment (2)", "vocal_accompaniment")
+        self.task_combo.addItem(
+            "Drum kit parts (kick, snare, toms, cymbals)", "drum_parts")
+        if not resources.get("drum_split_available", False):
+            item = self.task_combo.model().item(2)
+            if item is not None:
+                item.setEnabled(False)
+            self.task_combo.setItemText(
+                2, "Drum kit parts — install mdxnet-infer to enable")
+        self.task_combo.currentIndexChanged.connect(
+            self._update_task_hint)
+        layout.addWidget(self.task_combo)
+
+        self.task_hint = QLabel()
+        self.task_hint.setWordWrap(True)
+        self.task_hint.setStyleSheet(
+            "color: " + COLORS["text_dim"] + "; font-size: 13px;")
+        layout.addWidget(self.task_hint)
+
         info = QLabel(
-            "Fast (htdemucs) is the recommended default. High Quality "
+            "Fast (htdemucs) is recommended. High Quality "
             "(htdemucs_ft) runs four models and is roughly 4x slower "
-            "for a small quality gain. 6-stem adds guitar and piano.")
+            "for a modest quality gain. 6-stem adds guitar and piano. "
+            "Specialist drum parts require an additional model.")
         info.setWordWrap(True)
         info.setStyleSheet(
             "color: " + COLORS["text_dim"] + "; font-size: 13px;")
@@ -412,6 +436,25 @@ class ModelSelectionDialog(QDialog):
         layout.addWidget(buttons)
 
         self.on_model_changed()
+        self._update_task_hint()
+
+    def _update_task_hint(self):
+        task = self.selected_task()
+        descriptions = {
+            "full": (
+                "Separates a full mix into vocals, drums, bass and other; "
+                "the 6-stem model also separates guitar and piano."),
+            "vocal_accompaniment": (
+                "Separates vocals, then combines the model's other outputs "
+                "into an accompaniment stem. These are model-derived "
+                "stems, not a guarantee of isolated backing vocals."),
+            "drum_parts": (
+                "First isolates drums, then runs the specialist drum model "
+                "to produce individual kit parts. The model download is "
+                "about 438 MB; inference takes longer and uses additional "
+                "memory."),
+        }
+        self.task_hint.setText(descriptions[task])
 
     def on_model_changed(self):
         # Always keep GPU on when switching models — never auto-check CPU.
@@ -437,6 +480,9 @@ class ModelSelectionDialog(QDialog):
 
     def selected_model(self):
         return self.combo.currentData()
+
+    def selected_task(self):
+        return self.task_combo.currentData()
 
     def force_cpu(self):
         """True when the user opted out of GPU acceleration."""

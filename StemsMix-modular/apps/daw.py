@@ -1088,35 +1088,53 @@ class DAWWindow(QMainWindow):
         if dlg.exec() != QDialog.DialogCode.Accepted:
             return
         model = dlg.selected_model()
+        task = dlg.selected_task()
         providers = ["cpu"] if dlg.force_cpu() else "auto"
         chunked = dlg.use_chunked()
+        task_dir = (out_dir if task == "full"
+                    else os.path.join(out_dir, task))
 
         self._halt_playback()
         self._set_busy(True)
         self.progress.setValue(0)
         self.progress_label.setText("Starting separation...")
-        self.status.setText("Separating with " + model + "...")
+        self.status.setText("Separating: " + task.replace("_", " ") + "...")
 
         self.sep_worker = SeparationWorker(
-            input_file, out_dir, model,
-            providers=providers, chunked=chunked)
+            input_file, task_dir, model,
+            providers=providers, chunked=chunked, task=task)
         self.sep_worker.progress.connect(self.on_sep_progress)
         self.sep_worker.finished_ok.connect(
-            lambda r: self._load_folder(out_dir))
+            lambda stems: self._separation_task_finished(
+                task_dir, stems, task))
         self.sep_worker.failed.connect(
             lambda m: self.status.setText("Separation failed: " + m))
         self.sep_worker.finished.connect(lambda: self._set_busy(False))
         self.sep_worker.start()
 
+    def _separation_task_finished(self, folder, stems, task):
+        names = list(stems)
+        if not self._load_folder(folder, stem_names=names):
+            return
+        label = {
+            "full": "instrument stems",
+            "vocal_accompaniment": "vocal and accompaniment stems",
+            "drum_parts": "drum-part stems",
+        }.get(task, "stems")
+        self.status.setText(
+            "Separated {} into {} {}.".format(
+                os.path.basename(folder), len(names), label))
+
     def on_sep_progress(self, pct, msg):
         self.progress.setValue(pct)
         self.progress_label.setText(msg)
 
-    def _load_folder(self, folder):
+    def _load_folder(self, folder, stem_names=None):
         project = Project()
         chains = {}
         loaded = 0
-        for name in STEM_NAMES:
+        names = STEM_NAMES if stem_names is None else stem_names
+        for name in names:
             p = os.path.join(folder, name + ".wav")
             if not os.path.exists(p):
                 continue
@@ -1135,14 +1153,16 @@ class DAWWindow(QMainWindow):
         if loaded == 0:
             # Keep whatever was loaded before instead of wiping it.
             self.status.setText("No valid stems found in " + folder)
-            return
+            return False
         self._halt_playback()
         project.click_enabled = self.project.click_enabled
         project.click_volume = self.project.click_volume
         self.project = project
         self.dsp_chains = chains
-        self.stem_paths = {n: os.path.join(folder, n + ".wav")
-                           for n in chains}
+        self.stem_paths = {
+            n: os.path.join(folder, n + ".wav")
+            for n in chains if os.path.exists(
+                os.path.join(folder, n + ".wav"))}
         self.chords = []
         self.chord_label.setVisible(False)
         self.chord_strip.setVisible(False)
@@ -1153,6 +1173,7 @@ class DAWWindow(QMainWindow):
             self.project.total_duration))
         self.status.setText(
             "Loaded {} stems from {}".format(loaded, folder))
+        return True
 
     def _rebuild_ui(self):
         try:

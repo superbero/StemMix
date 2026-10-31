@@ -344,6 +344,7 @@ def check_system_resources():
             "ram_gb": 0.0, "cores": 0, "can_run_6_stem": False,
             "reason": "Could not determine system resources.",
             "mlx": False,
+            "drum_split_available": False,
         }
 
     has_mlx = mlx_available()
@@ -373,4 +374,5 @@ def check_system_resources():
         "ram_gb": avail_gb, "cores": cores,
         "can_run_6_stem": can_run, "reason": reason,
         "mlx": has_mlx,
+        "drum_split_available": _module_ok("mdxnet_infer")[0],
     }

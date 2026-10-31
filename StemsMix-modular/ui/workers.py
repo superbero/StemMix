@@ -7,7 +7,7 @@ import soundfile as sf
 
 from PyQt6.QtCore import QThread, pyqtSignal
 
-from core.separation import separate_file
+from core.separation import separate_task
 from core.chords import detect_chords
 from core.beats import analyze_beats
 from core.timestretch import render_clips
@@ -38,7 +38,8 @@ class SeparationWorker(QThread):
     progress = pyqtSignal(int, str)
 
     def __init__(self, input_file, output_dir, model_name,
-                 providers="auto", precision="fp32", chunked=False):
+                 providers="auto", precision="fp32", chunked=False,
+                 task="full"):
         super().__init__()
         self.input_file = input_file
         self.output_dir = output_dir
@@ -50,6 +51,7 @@ class SeparationWorker(QThread):
         self.providers = providers
         self.precision = precision
         self.chunked = chunked
+        self.task = task
         self._cancel = False
 
     def cancel(self):
@@ -61,10 +63,11 @@ class SeparationWorker(QThread):
                 self.progress.emit(pct, msg)
                 if self._cancel:
                     raise RuntimeError("Cancelled.")
-            result = separate_file(
+            result = separate_task(
                 self.input_file, self.output_dir, self.model_name,
-                providers=self.providers, precision=self.precision,
-                chunked=self.chunked, progress_cb=cb)
+                task=self.task, providers=self.providers,
+                precision=self.precision, chunked=self.chunked,
+                progress_cb=cb)
             if self._cancel:
                 self.failed.emit("Cancelled.")
                 return

@@ -38,3 +38,11 @@ macOS: brew install portaudio ffmpeg
   Track order is saved with the project and restored by undo/redo.
 - Use **File → Setlist Manager…** to organize projects, then navigate songs
   with **Prev Song** / **Next Song** or `Ctrl+Alt+Left` / `Ctrl+Alt+Right`.
+
+## Separation tasks
+
+When opening audio, choose a task: standard 4/6 instrument stems, a
+two-output vocal/accompaniment workflow, or drum-kit parts. The vocal
+accompaniment is assembled from the selected Demucs model's outputs; it does
+not isolate lead and backing vocals. Drum-kit parts use the optional
+`mdxnet-infer` model after the main separator isolates drums.
