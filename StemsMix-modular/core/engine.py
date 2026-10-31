@@ -101,6 +101,108 @@ class TimelineEngine:
             chunk[:, 1] *= (1.0 + pan)
         return chunk
 
+    def _crossfade_gain(self, track, clip, a_frame, b_frame):
+        """Return a per-frame gain array for clip between global frames
+        a_frame..b_frame, applying crossfades where this clip overlaps
+        another on the same track.
+
+        Logic:
+          - sort clips by start_time; for clip at index i, check overlap
+            with i-1 (fade in over the left overlap) and i+1 (fade out
+            over the right overlap)
+          - overlap length is limited to 0.5 seconds to avoid mangling
+            long overlaps into a 30-second fade
+        """
+        import numpy as np
+        n = b_frame - a_frame
+        if n <= 0:
+            return np.ones(0, dtype="float32")
+        gain = np.ones(n, dtype="float32")
+        if len(track.clips) < 2:
+            return gain
+        sr = self.samplerate
+        cs = int(round(clip.start_time * sr))
+        ce = cs + len(_pd) if (_pd := clip.playback_data()) is not None else 0
+        max_fade_frames = int(0.5 * sr)
+
+        ordered = sorted(track.clips, key=lambda c: c.start_time)
+        try:
+            idx = ordered.index(clip)
+        except ValueError:
+            return gain
+
+        # fade in from previous overlap
+        if idx > 0:
+            prev = ordered[idx - 1]
+            prev_end = int(round(prev.start_time * sr)) + len(_pd) if (_pd := prev.playback_data()) is not None else 0
+            overlap = min(prev_end - cs, max_fade_frames)
+            if overlap > 0:
+                fade_start = max(a_frame, cs)
+                fade_end = min(b_frame, cs + overlap)
+                if fade_end > fade_start:
+                    ramp = np.linspace(
+                        0.0, 1.0, overlap, dtype="float32")
+                    s = fade_start - a_frame
+                    e = fade_end - a_frame
+                    gain[s:e] = ramp[:e - s]
+
+        # fade out into next overlap
+        if idx < len(ordered) - 1:
+            nxt = ordered[idx + 1]
+            nxt_start = int(round(nxt.start_time * sr))
+            overlap = min(ce - nxt_start, max_fade_frames)
+            if overlap > 0:
+                fade_start = max(a_frame, nxt_start)
+                fade_end = min(b_frame, ce)
+                if fade_end > fade_start:
+                    ramp = np.linspace(
+                        1.0, 0.0, overlap, dtype="float32")
+                    s = fade_start - a_frame
+                    e = fade_end - a_frame
+                    gain[s:e] = ramp[:e - s]
+
+        return gain
+
+    def _apply_clip_fades(self, clip, chunk, a_frame, b_frame):
+        """Multiply the head/tail of chunk by a linear ramp so
+        fade_in_seconds and fade_out_seconds are honoured."""
+        import numpy as np
+        n = chunk.shape[0]
+        if n <= 0:
+            return chunk
+        sr = self.samplerate
+        cs = int(round(clip.start_time * sr))
+        total = len(_pd) if (_pd := clip.playback_data()) is not None else 0
+        if total <= 0:
+            return chunk
+
+        fi = int(round(getattr(clip, 'fade_in_seconds', 0.0) * sr))
+        fo = int(round(getattr(clip, 'fade_out_seconds', 0.0) * sr))
+        fi = max(0, min(fi, total))
+        fo = max(0, min(fo, total))
+
+        gain = np.ones(n, dtype='float32')
+        if fi > 0:
+            # region of clip inside [a_frame, b_frame)
+            start = max(a_frame, cs)
+            end = min(b_frame, cs + fi)
+            if end > start:
+                ramp = np.linspace(0.0, 1.0, fi, dtype='float32')
+                s = start - a_frame
+                e = end - a_frame
+                gain[s:e] = ramp[start - cs:end - cs]
+        if fo > 0:
+            fo_start = cs + total - fo
+            start = max(a_frame, fo_start)
+            end = min(b_frame, cs + total)
+            if end > start:
+                ramp = np.linspace(1.0, 0.0, fo, dtype='float32')
+                s = start - a_frame
+                e = end - a_frame
+                gain[s:e] = ramp[start - fo_start:end - fo_start]
+
+        return chunk * gain[:, None]
+
     def _mix_block(self, start_frame, n_frames, offline=False):
         """Mix n_frames starting at start_frame into an (n, 2) array.
         Works in integer frames: float seconds used to drop a sample at
@@ -130,6 +232,10 @@ class TimelineEngine:
                 if n <= 0:
                     continue
                 chunk = src[a - cs:b - cs] * (clip.gain * track.volume)
+                chunk = self._apply_clip_fades(clip, chunk, a, b)
+                cf = self._crossfade_gain(track, clip, a, b)
+                if len(cf) == chunk.shape[0]:
+                    chunk = chunk * cf[:, None]
                 chunk = (dsp.process_offline(chunk) if offline
                          else dsp.process(chunk))
                 if getattr(clip, "effects", None) is not None:
@@ -158,6 +264,12 @@ class TimelineEngine:
         self.levels = levels
         mp = np.abs(out).max(axis=0)
         self.master_level = (float(mp[0]), float(mp[1]))
+
+        # Loop wrap takes priority over end-of-project
+        if self.project.loop.is_active():
+            if self.playhead_seconds >= self.project.loop.end:
+                self.seek(self.project.loop.start)
+                return
 
         total = self.project.total_duration
         if total > 0 and self.playhead_seconds >= total:

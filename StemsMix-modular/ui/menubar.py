@@ -24,8 +24,12 @@ def build_menubar(window):
         stop_playback()
         rewind()
     """
-    bar = QMenuBar(window)
-    bar.setNativeMenuBar(True)   # macOS native bar at the top of the screen
+    # Use the QMenuBar QMainWindow already owns. Constructing a
+    # new QMenuBar and installing it with setMenuBar() does not
+    # reliably replace the native macOS menu bar, so the menu
+    # ends up attached to an invisible bar and never appears.
+    bar = window.menuBar()
+    bar.setNativeMenuBar(True)
 
     # --- File ---
     file_menu = bar.addMenu("&File")
@@ -107,9 +111,5 @@ def build_menubar(window):
     act_rewind.triggered.connect(window.rewind)
     transport_menu.addAction(act_rewind)
 
-    # Attach to the window. QMainWindow keeps the menu alive, so no
-    # explicit reference is required — but storing it on `window` makes
-    # debugging easier.
-    window.setMenuBar(bar)
     window._menubar = bar
     return bar

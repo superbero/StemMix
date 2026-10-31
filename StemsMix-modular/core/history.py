@@ -87,6 +87,7 @@ def _snapshot(project):
         "click_volume": float(project.click_volume),
         "beats_per_bar": int(project.beats_per_bar),
         "downbeat_phase": int(project.downbeat_phase),
+        "loop": project.loop.to_dict(),
         "tracks": [
             {
                 "name": t.name,
@@ -105,6 +106,8 @@ def _snapshot(project):
                         "muted": bool(c.muted),
                         "soloed": bool(c.soloed),
                         "color_hint": c.color_hint,
+                        "fade_in": float(c.fade_in_seconds),
+                        "fade_out": float(c.fade_out_seconds),
                     }
                     for c in t.clips
                 ],
@@ -143,6 +146,8 @@ def _restore(snap, current_project):
     p.click_volume = float(snap["click_volume"])
     p.beats_per_bar = int(snap["beats_per_bar"])
     p.downbeat_phase = int(snap["downbeat_phase"])
+    from .loop import LoopRegion
+    p.loop = LoopRegion.from_dict(snap.get("loop"))
 
     for tdata in snap["tracks"]:
         track = Track(tdata["name"])
@@ -164,6 +169,10 @@ def _restore(snap, current_project):
             clip.muted = bool(cdata["muted"])
             clip.soloed = bool(cdata["soloed"])
             clip.color_hint = cdata["color_hint"]
+            clip.fade_in_seconds = float(
+                cdata.get("fade_in", 0.0))
+            clip.fade_out_seconds = float(
+                cdata.get("fade_out", 0.0))
             track.add_clip(clip)
         p.add_track(track)
 

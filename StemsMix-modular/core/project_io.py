@@ -105,6 +105,8 @@ def _clip_to_dict(clip):
         "muted": bool(clip.muted),
         "soloed": bool(clip.soloed),
         "color_hint": clip.color_hint,
+        "fade_in": float(clip.fade_in_seconds),
+        "fade_out": float(clip.fade_out_seconds),
         "effects": (None if clip.effects is None
                     else _dsp_to_dict(clip.effects)),
     }
@@ -143,6 +145,7 @@ def serialize_project(project, dsp_chains):
             "click_volume": float(project.click_volume),
             "beats_per_bar": int(project.beats_per_bar),
             "downbeat_phase": int(project.downbeat_phase),
+            "loop": project.loop.to_dict(),
         },
         "tracks": [
             _track_to_dict(t, dsp_chains[t.name])
@@ -229,6 +232,8 @@ def load_project(path):
     project.click_volume = float(pdata.get("click_volume", 0.6))
     project.beats_per_bar = int(pdata.get("beats_per_bar", 4))
     project.downbeat_phase = int(pdata.get("downbeat_phase", 0))
+    from .loop import LoopRegion
+    project.loop = LoopRegion.from_dict(pdata.get("loop"))
 
     dsp_params = {}
     missing = []
@@ -280,6 +285,10 @@ def load_project(path):
             clip.muted = bool(cdata.get("muted", False))
             clip.soloed = bool(cdata.get("soloed", False))
             clip.color_hint = cdata.get("color_hint")
+            clip.fade_in_seconds = float(
+                cdata.get("fade_in", 0.0))
+            clip.fade_out_seconds = float(
+                cdata.get("fade_out", 0.0))
             if filepath and (name, filepath) in missing or audio.shape == (1, 2):
                 clip.missing = True
             else:

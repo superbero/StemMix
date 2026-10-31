@@ -150,6 +150,10 @@ class DAWWindow(QMainWindow):
         self._render_timer.timeout.connect(self._start_render)
         self.playback_timer = QTimer(self)
         self.playback_timer.setInterval(40)
+        from PyQt6.QtCore import QSettings
+        self._settings = QSettings("StemsMix", "StemsMix")
+        self._follow_playhead = self._settings.value(
+            "follow_playhead", True, bool)
         self.playback_timer.timeout.connect(self.update_playhead)
         self.init_ui()
         for key, fn in ((Qt.Key.Key_Space, self.toggle_playback),
@@ -157,6 +161,7 @@ class DAWWindow(QMainWindow):
             sc = QShortcut(QKeySequence(key), self)
             sc.activated.connect(fn)
         self._project_shortcuts = install_project_shortcuts(self)
+        self._install_nudge_shortcuts()
         self.stem_export_worker = None
                   # <-- add this line inside __init__
 
@@ -394,7 +399,15 @@ class DAWWindow(QMainWindow):
         h.addWidget(self.btn_batch)
         return bar
 
-
+    def toggle_playback(self):
+        if not self.engine:
+            return
+        for t in self.project.tracks:
+            print("[play]", t.name, "muted:", t.muted,
+                  "soloed:", t.soloed, "vol:", t.volume,
+                  "clips:", len(t.clips),
+                  "first_clip_len:", len(t.clips[0].data) if t.clips else 0)
+        ...
     def _build_songbar(self):
         bar = QFrame()
         bar.setObjectName("songbar")
@@ -478,6 +491,15 @@ class DAWWindow(QMainWindow):
             h.addWidget(w)
         h.addStretch(1)
 
+        self.btn_follow = QPushButton()
+        self.btn_follow.setCheckable(True)
+        self.btn_follow.setChecked(self._follow_playhead)
+        self.btn_follow.setObjectName("tinyWide")
+        self.btn_follow.setText("Follow" if self._follow_playhead else "Fixed")
+        self.btn_follow.setToolTip("Scroll the timeline to follow the playhead")
+        self.btn_follow.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.btn_follow.toggled.connect(self._set_follow)
+        h.addWidget(self.btn_follow)
         self.btn_split_drums = QPushButton("Split Drums")
         self.btn_split_drums.clicked.connect(self.split_drums)
         self.btn_chords = QPushButton("Detect Chords")
@@ -1274,7 +1296,8 @@ class DAWWindow(QMainWindow):
     def update_playhead(self):
         if not self.engine:
             return
-        self._show_playhead(self.engine.playhead_seconds, follow=True)
+        self._show_playhead(self.engine.playhead_seconds,
+                            follow=self._follow_playhead)
         self.mixer.update_levels(self.engine.levels,
                                  self.engine.master_level)
         self._flash_beat()
@@ -1449,6 +1472,87 @@ class DAWWindow(QMainWindow):
         self.status.setText(
             "{} chords found ({}). Click a chord to jump to it.".format(
                 len(chords), ", ".join(names[:8]) + (" ..." if len(names) > 8 else "")))
+
+    def _on_loop_changed(self, start, end):
+        self.project.loop.start = start
+        self.project.loop.end = end
+        self.project.loop.enabled = True
+        self.loop_markers.set_loop(start, end, True)
+        self.status.setText(
+            "Loop: {:.2f}s - {:.2f}s".format(start, end))
+
+    def _toggle_loop_enabled(self):
+        self.project.loop.enabled = not self.project.loop.enabled
+        self.loop_markers.set_loop(
+            self.project.loop.start,
+            self.project.loop.end,
+            self.project.loop.enabled)
+        self.status.setText(
+            "Loop {}".format("enabled" if self.project.loop.enabled
+                              else "disabled"))
+
+
+    def _install_nudge_shortcuts(self):
+        """Nudge and quantize shortcuts for the selected clip."""
+        from PyQt6.QtGui import QKeySequence, QShortcut
+
+        def do_nudge(seconds):
+            if not self.selected_clip:
+                return
+            from core.nudge import nudge_seconds
+            self._push_undo("Nudge clip")
+            clip, item = self.selected_clip
+            clip.start_time = nudge_seconds(clip.start_time, seconds)
+            item.setX(time_to_x(clip.start_time))
+            self._project_changed()
+            self.status.setText(
+                "Clip start: {:.3f}s".format(clip.start_time))
+
+        def do_quantize(mode):
+            if not self.selected_clip:
+                return
+            if not self._has_beats():
+                self.status.setText("No beat grid to quantize against.")
+                return
+            from core.nudge import quantize_by_fraction
+            from core.beats import bpm_from_beats
+            self._push_undo("Quantize clip")
+            clip, item = self.selected_clip
+            bpm = None
+            try:
+                bpm = bpm_from_beats(self.project.beat_times)
+            except Exception:
+                pass
+            eff = (bpm * self.project.tempo) if bpm else None
+            clip.start_time = quantize_by_fraction(
+                clip.start_time, eff, fraction=1.0, mode=mode)
+            item.setX(time_to_x(clip.start_time))
+            self._project_changed()
+            self.status.setText(
+                "Quantized to {:.3f}s".format(clip.start_time))
+
+        self._nudge_shortcuts = []
+        for seq, fn in (
+                ("[", lambda: do_nudge(-0.010)),
+                ("]", lambda: do_nudge(+0.010)),
+                ("{", lambda: do_nudge(-0.100)),
+                ("}", lambda: do_nudge(+0.100)),
+                ("Shift+[", lambda: do_nudge(-1.000)),
+                ("Shift+]", lambda: do_nudge(+1.000)),
+                ("N", lambda: do_quantize("nearest")),
+                ("Shift+N", lambda: do_quantize("floor")),
+                ("Alt+N", lambda: do_quantize("ceil"))):
+            sc = QShortcut(QKeySequence(seq), self)
+            sc.activated.connect(fn)
+            self._nudge_shortcuts.append(sc)
+
+    def _set_follow(self, on):
+        self._follow_playhead = bool(on)
+        if hasattr(self, "_settings"):
+            self._settings.setValue("follow_playhead", on)
+        if hasattr(self, "btn_follow"):
+            self.btn_follow.setText(
+                "Follow" if on else "Fixed")
 
     def closeEvent(self, event):
         try:

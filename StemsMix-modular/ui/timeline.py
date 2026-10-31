@@ -129,6 +129,49 @@ class ClipItem(QGraphicsRectItem):
                      self.rect().height())
         self._wave_item.setTransform(QTransform.fromScale(1.0 / stretch, 1.0))
 
+    # ---- fade handle interaction ----
+    def _fade_hit(self, pos):
+        r = self.rect()
+        if abs(pos.x() - r.left()) <= 8 and pos.y() <= 12:
+            return 'in'
+        if abs(pos.x() - r.right()) <= 8 and pos.y() <= 12:
+            return 'out'
+        return None
+
+    def mousePressEvent(self, event):
+        kind = self._fade_hit(event.pos())
+        if kind and self.clip_ref is not None:
+            self._fade_drag = kind
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        kind = getattr(self, '_fade_drag', None)
+        if not kind or self.clip_ref is None:
+            super().mouseMoveEvent(event)
+            return
+        r = self.rect()
+        x = max(0.0, min(r.width(), event.pos().x()))
+        frac = (x / r.width()) if r.width() > 0 else 0.0
+        dur = self.clip_ref.duration / max(self.clip_ref.stretch, 1e-6)
+        if kind == 'in':
+            self.clip_ref.fade_in_seconds = frac * dur
+        else:
+            self.clip_ref.fade_out_seconds = (1.0 - frac) * dur
+        self.update()
+        event.accept()
+
+    def mouseReleaseEvent(self, event):
+        if getattr(self, '_fade_drag', None):
+            self._fade_drag = None
+            sc = self.scene()
+            if sc is not None and hasattr(sc, 'clip_moved'):
+                sc.clip_moved.emit()
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
+
     def itemChange(self, change, value):
         if change == QGraphicsItem.GraphicsItemChange.ItemPositionChange:
             return QPointF(max(0.0, value.x()), self._lane_y)
@@ -161,6 +204,21 @@ class ClipItem(QGraphicsRectItem):
         painter.setPen(pen)
         painter.setBrush(Qt.BrushStyle.NoBrush)
         painter.drawRoundedRect(r, rx, ry)
+        # Fade handles: small triangles at the top corners
+        fi = getattr(self.clip_ref, 'fade_in_seconds', 0.0) or 0.0
+        fo = getattr(self.clip_ref, 'fade_out_seconds', 0.0) or 0.0
+        handle_col = QColor('#ffffff')
+        handle_col.setAlpha(180 if selected else 90)
+        painter.setPen(QPen(handle_col, 1))
+        painter.setBrush(QBrush(handle_col))
+        if fi > 0:
+            fx = self._base_w * min(1.0, fi / max(self.duration, 1e-6))
+            painter.drawLine(QPointF(fx, 0), QPointF(fx, r.height()))
+        if fo > 0:
+            fx = self._base_w * max(0.0, 1.0 - fo / max(self.duration, 1e-6))
+            painter.drawLine(QPointF(fx, 0), QPointF(fx, r.height()))
+        painter.drawEllipse(QPointF(r.left() + 4, 4), 3, 3)
+        painter.drawEllipse(QPointF(r.right() - 4, 4), 3, 3)
 
 
 class PlayheadItem(QGraphicsItem):

@@ -1,6 +1,8 @@
 """Timeline project state: tracks, clips, playhead. No audio, no Qt."""
 import copy
 
+from .loop import LoopRegion
+
 
 class Clip:
     """A piece of audio placed on a timeline.
@@ -27,6 +29,8 @@ class Clip:
         self.muted = False
         self.soloed = False
         self.color_hint = None
+        self.fade_in_seconds = 0.0
+        self.fade_out_seconds = 0.0
         self.render = None
         self.render_key = None
         self.render_quality = None   # 'fast' (preview) or 'high'
@@ -93,6 +97,7 @@ class Project:
     def __init__(self):
         self.tracks = []
         self.samplerate = 44100
+        self.loop = LoopRegion()
         self.total_duration = 0.0
         self.master_volume = 1.0
         self.tempo = 1.0   # cumulative tempo ratio vs. the original
